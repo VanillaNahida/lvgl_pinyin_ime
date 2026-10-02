@@ -127,14 +127,55 @@ size_t im_get_predicts(const char16 *his_buf, char16 (*&pre_buf)[kMaxPredictSize
 - **上游完全没有双拼支持**（无 `SetDpScheme`、无方案表），S5 需在
   `src/core/ime_scheme.c` 自行实现方案映射后再喂全拼给引擎。
 
-## 5. 哈希表与字典树的落点
+## 5. 解码算法：unigram 引擎 + 自建 bigram 联想
+
+### 5.1 引擎层（上游 libgooglepinyin，unigram）
+
+```
+ime_engine_search(全拼串)
+  → im_search() → MatrixSearch
+  → spellingtrie.cpp   音节 trie 切分
+  → lpicache.cpp       词条缓存查询
+  → NGram::get_uni_psb()  逐个词条打分
+  → extend_mtrx_nd()   多音节句子的动态规划分词
+```
+
+`NGram` 只提供 unigram：`ngram.h` 里仅 `get_uni_psb()` 与 `build_unigram()`，
+**没有**任何 bigram 构建或查询函数。因此单个搜索步内，词 *n* 的频率不影响词 *n+1*
+的得分；多音节句子的切分靠 `extend_mtrx_nd()` 在这些 unigram 得分上做动态规划，
+而不是靠词间转移概率。这是 2009 年上游遗留的真实短板。
+
+### 5.2 联想层（本项目，bigram）
+
+上屏之后由 `ime_assoc.c` 预测下一个词，2-gram 信息在这一层：
+
+| 来源 | 说明 |
+| --- | --- |
+| bigram 哈希表 | `ime_hash.c`，键为前词，值为后继候选及其计数 |
+| 首字联想 | 前词首字 → 常用搭配 |
+| 用户近期词 | 近期上屏记录，冷启动时兜底 |
+
+数据来自 `ime_bigram.bin`，由 `tools/gen_bigram.py` 离线生成；未提供语料时不生成该
+文件，联想自动降级为「首字联想 + 用户近期词」，功能不报错。**该层属 S5，尚未落地。**
+
+### 5.3 结论
+
+- **引擎**是纯 unigram，这是继承自上游的真实限制；
+- **项目**在其上另有一层 bigram 联想；
+- 与 libpinyin / sunpinyin 比较时，准确说法是「libgooglepinyin 引擎仅用 unigram
+  打分」，而非「本项目仅用 unigram」。
+
+九键路径自身不带任何打分：`ime_trie.c` 数字串→候选音节、`ime_t9.c` 展开，都是查表，
+随后把拼好的全拼串交给同一个引擎。排序逻辑只有一处——引擎加联想层。
+
+## 6. 哈希表与字典树的落点
 
 | 结构 | 用途 | 实现说明 |
 | --- | --- | --- |
 | 哈希表 `ime_hash.c` | 扩展词库索引、S5 的联想 bigram 与用户词频 | 开放寻址 + 线性探测 + 墓碑槽位，容量固定为 2 的幂，键为组件自持副本 |
 | 前缀索引 `ime_trie.c` | 九键数字 → 拼音（`94` → `xi`/`yi`/`zi`；`9464` → `xing`/`ying`），最短拼写优先 | 音节表按数字串排序，413 条全表扫描（ESP32-S3 上数微秒），不建节点表、不额外占 RAM |
 
-## 6. 内存预算（ESP32-S3-N16R8，8 MB PSRAM）
+## 7. 内存预算（ESP32-S3-N16R8，8 MB PSRAM）
 
 | 项 | 规模 | 位置 |
 | --- | --- | --- |
@@ -144,8 +185,9 @@ size_t im_get_predicts(const char16 *his_buf, char16 (*&pre_buf)[kMaxPredictSize
 | 字体分区映射 | ≤ 3 MB | flash → mmap |
 | 引擎运行时（Trie 等） | 约 1.5–2 MB（零拷贝路径下更低） | PSRAM 优先 |
 
-## 7. 相关文档
+## 8. 相关文档
 
 - 键位与布局：[keymap.md](./keymap.md)
 - 组件接入：[integration.md](./integration.md)
 - 词库二进制格式：[dict_format.md](./dict_format.md)
+- 算法与相关项目对比：[../README.md](../README.md#algorithm)

@@ -1,5 +1,7 @@
 # lvgl_pinyin_ime
 
+**English** | [简体中文](README_zh-cn.md)
+
 Chinese pinyin input method (IME) component for **LVGL 9.5** on **ESP-IDF 6.1**.
 
 - Engine: [libgooglepinyin](https://salsa.debian.org/input-method-team/libgooglepinyin) (Apache-2.0)
@@ -113,6 +115,53 @@ output into the LVGL 9 struct layout; see
 - [docs/architecture.md](docs/architecture.md) - layering, data flow, port patches
 - [docs/integration.md](docs/integration.md) - component usage, partitions, fonts, SD dictionary
 - [docs/dict_format.md](docs/dict_format.md) - binary formats for dictionary and font images
+
+## Algorithm
+
+The decoding stack has two distinct layers, and they use different models. This
+matters when comparing the project against desktop IME engines.
+
+**Engine layer (libgooglepinyin, unigram).** `im_search()` hands the spelling
+string to `MatrixSearch`, which walks the syllable trie (`spellingtrie.cpp`),
+looks candidates up in the lemma cache (`lpicache.cpp`) and scores them with
+`NGram::get_uni_psb()`. That is a **unigram** model: each lemma carries an
+independent frequency, with no cross-word context. `ngram.h` exposes only
+`get_uni_psb()` and `build_unigram()` - there is no bigram builder upstream, so
+within one search step word *n* does not affect the score of word *n+1*. Word
+segmentation across a multi-syllable sentence is resolved by dynamic programming
+(`extend_mtrx_nd()`) over those unigram scores.
+
+**Association layer (this project, bigram).** After a candidate is committed,
+`ime_assoc` predicts the next word. This is where 2-gram information lives, and
+it is ours, not upstream's: a bigram hash table (`ime_hash.c`) plus
+first-character association and a recency list of the user's own entries. It is
+fed by `ime_bigram.bin`, generated offline by `tools/gen_bigram.py`; if no corpus
+is supplied the file is not generated and association degrades gracefully to
+first-character association plus user recency. **Stage S5 - not yet landed.**
+
+So the *engine* is unigram-only, a genuine limitation inherited from the 2009
+upstream, while the *project* adds a bigram association pass on top. A precise
+comparison with libpinyin or sunpinyin should say "libgooglepinyin's engine uses
+unigram scoring", not "this project uses unigram".
+
+The 9-key path adds no scoring of its own: `ime_trie.c` maps digit strings to
+candidate syllables and `ime_t9.c` expands them, both by table lookup, and the
+resulting full-pinyin string is then passed to the same engine. Ranking stays in
+one place - the engine plus the association layer.
+
+## Related projects
+
+If you are interested in more feature-complete pinyin input methods, try
+**libpinyin** or **sunpinyin**; both are supported by fcitx and ibus. They use
+more advanced algorithms (2-gram language models, where libgooglepinyin's engine
+uses unigram only) and support more features, such as double pinyin, zhuyin and
+fuzzy pinyin. Note that they target desktop environments - they depend on GLib
+and, for sunpinyin, an SQLite-backed language model, so they are a poor fit for
+an ESP32 target.
+
+If you are looking for extra features on top of libgooglepinyin, try
+**fcitx-googlepinyin**, which gives you fcitx's quick phrases, virtual keyboard,
+cloud pinyin and customisable punctuation for free.
 
 ## License
 
