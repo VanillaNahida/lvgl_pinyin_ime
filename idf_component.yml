@@ -1,0 +1,6 @@
+version: "0.1.0"
+description: "LVGL Chinese Pinyin IME: 26-key / 9-key keyboards, full & double pinyin, phrase input, association and user dictionary"
+license: "Apache-2.0"
+dependencies:
+  idf: ">=5.3"
+  lvgl/lvgl: "^9.5"

@@ -1,0 +1,4 @@
+# ESP32-S3-N16R8: 8 MB octal PSRAM, used as the first choice for engine buffers
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y

@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 lvgl_pinyin_ime contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Host side tooling. Everything installs into tools/venv, never globally:
+#   powershell -ExecutionPolicy Bypass -File tools/setup_env.ps1
+fonttools>=4.50
+pypinyin>=0.51

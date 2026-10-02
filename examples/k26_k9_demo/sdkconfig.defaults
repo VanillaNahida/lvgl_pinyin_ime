@@ -1,0 +1,30 @@
+# Shared defaults for the k26_k9_demo example
+
+# 16 MB flash with the IME partition layout
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../partitions/ime_16mb.csv"
+
+CONFIG_FREERTOS_HZ=1000
+
+# LVGL runs inside app_main: rendering a screen and building the calibration
+# wizard needs far more than the 3584 byte default stack (it overflowed).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
+
+# LVGL: 16 bit colour per pixel. The byte order the ST7789 needs is selected at
+# runtime with lv_display_set_color_format(), see main.c.
+CONFIG_LV_COLOR_DEPTH_16=y
+# LV_FONT_FMT_TXT_LARGE must stay OFF. lv_font_conv only ever emits the compact
+# 8 byte lv_font_fmt_txt_glyph_dsc_t (bitmap_index:20, adv_w:12, ...), so with
+# the large 12 byte format enabled LVGL walks glyph_dsc[] at the wrong stride and
+# draws nothing at all. The generated fonts fit the 1 MB / 20 bit offset field:
+# 797 KB for the 20 px font and 341 KB for the 16 px one. src/data/ime_font.c
+# has a compile time check for this.
+# CONFIG_LV_FONT_FMT_TXT_LARGE is not set
+
+# The IME loads the generated fonts from memory: the font partition is mmap()ed
+# and handed to lv_binfont_create_from_buffer(), which is LVGL's memory file
+# system. Without a drive letter lv_fs_open() cannot resolve any path, so no
+# font would ever load and the candidates would draw as boxes.
+CONFIG_LV_USE_FS_MEMFS=y
+CONFIG_LV_FS_MEMFS_LETTER=65

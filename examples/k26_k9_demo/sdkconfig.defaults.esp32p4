@@ -1,0 +1,2 @@
+# ESP32-P4: no target specific override yet.
+# The shared defaults (16 MB flash, IME partition layout) are sufficient to build.

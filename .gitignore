@@ -1,0 +1,52 @@
+# ESP-IDF build output
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+
+# Generated artifacts (dictionary / font images)
+# Anchor to the repository root: src/generated/ holds committed headers
+# (e.g. ime_t9_syllables.h) that the build includes, so it must stay trackable.
+/generated/
+
+# Python tool environment
+tools/venv/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Compiled / generated binaries
+*.exe
+*.bin
+*.o
+*.obj
+
+# Logs and editor temp files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# Agent tooling scratch
+.dsh-acl-out/
+.trae/
+.cursor/
+.vscode/
+
+# Editors / OS
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+assets/
+*.dat
+
+# Build trees under the tracked host test / probe sources.
+test_apps/*/build/
+test_apps/idf_component_build/
+reference/
