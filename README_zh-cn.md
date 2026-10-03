@@ -2,6 +2,9 @@
 
 面向 **ESP-IDF 6.1** 上 **LVGL 9.5** 的中文拼音输入法（IME）组件。
 
+> [!WARNING]
+> 该仓库为AI生成。
+
 [English](README.md) | **简体中文**
 
 - 引擎：[libgooglepinyin](https://salsa.debian.org/input-method-team/libgooglepinyin)（Apache-2.0）
