@@ -30,7 +30,7 @@
 [English](README.md) | **简体中文**
 
 - 引擎：[libgooglepinyin](https://salsa.debian.org/input-method-team/libgooglepinyin)（Apache-2.0）
-- 键盘：26 键全键盘 + 9 键（T9），外加共用的数字／符号面板
+- 键盘：26 键全键盘 + 9 键（T9），外加共用的数字/符号面板
 - 输入：全拼、双拼（六套方案，默认小鹤）、词组、整句
 - 特性：候选翻页、音节分隔符 `'`、联想、用户词频学习、模糊音（默认关闭）
 - 目标平台：ESP32-S3-N16R8（主要）、ESP32-S31、ESP32-P4
@@ -45,7 +45,7 @@
 | S-1 | 设计文档（`docs/`） | 完成 |
 | S0 | 工程骨架、示例应用、三目标构建 | 完成 |
 | S1 | libgooglepinyin 移植 + 引擎门面 + 词库装载 | **完成** |
-| S2 | Python 工具链（词库／字符集／字体） | **完成**（扩展词库随 S5 落地） |
+| S2 | Python 工具链（词库/字符集/字体） | **完成**（扩展词库随 S5 落地） |
 | S3 | UI：根对象、候选栏、26 键、面板 | **完成** |
 | S4 | 9 键：T9 缓冲、字典树、哈希表 | **完成** |
 | S5 | 双拼、模糊音、联想、用户词典 | 待做 |
@@ -128,7 +128,7 @@ LVGL 8 结构后处理成 LVGL 9 的结构布局；它改了什么、为什么�
 
 ## 文档
 
-- [docs/usage.md](docs/usage.md) —— 环境、接线、编译／烧录、触摸校准
+- [docs/usage.md](docs/usage.md) —— 环境、接线、编译/烧录、触摸校准
 - [docs/keymap.md](docs/keymap.md) —— 键位布局与逐键行为
 - [docs/architecture.md](docs/architecture.md) —— 分层、数据流、移植补丁
 - [docs/integration.md](docs/integration.md) —— 组件接入、分区、字体、SD 词库
