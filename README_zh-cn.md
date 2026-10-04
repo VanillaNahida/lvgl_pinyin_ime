@@ -2,6 +2,28 @@
 
 面向 **ESP-IDF 6.1** 上 **LVGL 9.5** 的中文拼音输入法（IME）组件。
 
+<!-- <div align="center">
+  <img height="1080" alt="IMG_20261003_022916" src="https://github.com/user-attachments/assets/5c1e9c02-6adc-4e11-a848-4a5f6544f932" />
+  <p>运行在嵌入式 Linux</p> 
+  <img width="1080" height="1920" alt="26-keyboard" src="https://github.com/user-attachments/assets/ca59b750-8422-4a81-83e6-ea33bf7a3dd9" />
+  <p>运行在ESP32S3 26键盘</p> 
+  <img width="3072" height="4096" alt="T9-keyboard" src="https://github.com/user-attachments/assets/66cafd9e-4c00-440b-9213-55d1b87d6ca8" />
+  <p>运行在ESP32S3 T9键盘</p> 
+</div> -->
+
+<table>
+  <tr>
+    <td align="center"><img src="https://github.com/user-attachments/assets/5c1e9c02-6adc-4e11-a848-4a5f6544f932" width="200"></td>
+    <td align="center"><img src="https://github.com/user-attachments/assets/ca59b750-8422-4a81-83e6-ea33bf7a3dd9" width="200"></td>
+    <td align="center"><img src="https://github.com/user-attachments/assets/66cafd9e-4c00-440b-9213-55d1b87d6ca8" width="200"></td>
+  </tr>
+  <tr>
+    <td align="center">运行在嵌入式 Linux</td>
+    <td align="center">运行在ESP32S3 26键盘</td>
+    <td align="center">运行在ESP32S3 T9键盘</td>
+  </tr>
+</table>
+
 > [!WARNING]
 > 该仓库为AI生成。
 
