@@ -29,6 +29,7 @@ static const char *TAG = "ime_font";
 static lv_font_t *s_big;
 static lv_font_t *s_small;
 static bool s_prepared;
+static bool s_override;   /* s_big/s_small point at the application's fonts */
 
 /* ------------------------------------------------------------------ embedded */
 
@@ -129,6 +130,24 @@ lv_font_t *ime_font_small(void)
     return s_small;
 }
 
+void ime_font_set_override(const lv_font_t *big, const lv_font_t *small)
+{
+    if (big != NULL) {
+        s_big = (lv_font_t *)big;
+    }
+    if (small != NULL) {
+        s_small = (lv_font_t *)small;
+    }
+    /*
+     * Mark the subsystem as settled so ime_font_init() does not go and load the
+     * built-in fonts on top of the application's: those would either replace the
+     * override or fail (no font partition) and log a warning for nothing.
+     */
+    s_prepared = true;
+    s_override = true;
+    IME_LOGI(TAG, "font override: big=%p small=%p", (const void *)big, (const void *)small);
+}
+
 bool ime_font_init(void)
 {
     if (s_prepared) {
@@ -209,15 +228,24 @@ bool ime_font_init(void)
 void ime_font_deinit(void)
 {
 #if !IME_FONT_USE_EMBEDDED
-    if (s_big != NULL) {
-        lv_binfont_destroy(s_big);
-    }
-    if (s_small != NULL) {
-        lv_binfont_destroy(s_small);
+    /*
+     * Only destroy fonts this module created (the binfonts loaded from the
+     * partition). With an override in place s_big/s_small point at the
+     * application's fonts, which it owns - destroying them here would free
+     * something the whole UI is still drawing with.
+     */
+    if (!s_override) {
+        if (s_big != NULL) {
+            lv_binfont_destroy(s_big);
+        }
+        if (s_small != NULL) {
+            lv_binfont_destroy(s_small);
+        }
     }
     ime_vfs_unmount_all();
 #endif
     s_big = NULL;
     s_small = NULL;
     s_prepared = false;
+    s_override = false;
 }

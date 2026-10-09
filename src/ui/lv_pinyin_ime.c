@@ -154,13 +154,18 @@ void ime_ui_apply_sizes(lv_pinyin_ime_ctx_t *ctx)
     const int fit = IME_UI_FIT_HEIGHT_PX;
 
     const uint32_t key_rows = lv_obj_get_child_count(ctx->kb_rows);
-    const bool t9_visible = (ctx->mode == IME_MODE_K9) && ctx->t9_row_visible;
+    /* The 9-key pinyin row is counted only while it is actually on screen (it is
+     * hidden when empty, see ime_ui_refresh_t9): the hidden flag is the single
+     * source of truth, so a row that is not drawn never takes height away from
+     * the keys. */
+    const bool t9_visible = (ctx->t9_row != NULL) &&
+                            !lv_obj_has_flag(ctx->t9_row, LV_OBJ_FLAG_HIDDEN);
     const uint32_t rows_total = 1u + (t9_visible ? 1u : 0u) + key_rows;
     if (rows_total == 0) {
         return;
     }
     const uint32_t root_children = 1u + (t9_visible ? 1u : 0u) + 1u; /* cand + t9? + kb_rows */
-    const uint32_t fixed = 4u                          /* root pad_all top+bottom */
+    const uint32_t fixed = 2u * IME_UI_PAD            /* root pad_all top+bottom */
                          + 3u * (root_children - 1u)   /* root pad_row gaps */
                          + 3u * (key_rows > 0 ? key_rows - 1u : 0u); /* kb_rows pad_row gaps */
 
@@ -184,6 +189,16 @@ void ime_ui_apply_sizes(lv_pinyin_ime_ctx_t *ctx)
             lv_obj_set_height(row, rh);
         }
     }
+}
+
+void lv_pinyin_ime_set_fonts(const lv_font_t *big, const lv_font_t *small)
+{
+    /*
+     * The fonts live in the font subsystem, so this is all it takes: every widget
+     * built afterwards picks them up from ime_font_big() / ime_font_small().
+     * (Call it before lv_pinyin_ime_create(); see the header.)
+     */
+    ime_font_set_override(big, small);
 }
 
 lv_obj_t *lv_pinyin_ime_create(lv_obj_t *parent)
@@ -503,9 +518,15 @@ static void bksp_hint_ensure(lv_pinyin_ime_ctx_t *ctx)
     ime_style_apply_chip(ctx->bksp_hint);
     ime_style_apply_font(ctx->bksp_hint, ime_font_small());
     lv_obj_add_flag(ctx->bksp_hint, LV_OBJ_FLAG_HIDDEN);
-    /* The root is a flex column: without this the hint would become a row of the
-     * keyboard and push everything else around. */
-    lv_obj_add_flag(ctx->bksp_hint, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    /*
+     * FLOATING, not IGNORE_LAYOUT: the root is a flex column whose height is
+     * LV_SIZE_CONTENT, and calc_content_height() skips HIDDEN and FLOATING
+     * children only - an IGNORE_LAYOUT child still counts towards the parent's
+     * content height (see the pinyin chip in lv_pinyin_ime_cand.c for what that
+     * feedback loop does to lv_obj_update_layout()). The hint is an overlay: it
+     * must not take part in the layout *or* in the size.
+     */
+    lv_obj_add_flag(ctx->bksp_hint, LV_OBJ_FLAG_FLOATING);
     lv_obj_remove_flag(ctx->bksp_hint, LV_OBJ_FLAG_CLICKABLE);
 }
 
@@ -635,8 +656,20 @@ void ime_ui_handle_key(lv_pinyin_ime_ctx_t *ctx, const ime_key_t *key)
          * Always hand the lower-case letter over: the session owns the shift
          * state machine and decides the case (English only), so the UI and the
          * committed text cannot disagree about it.
+         *
+         * ★ However, the session may *spend* an English one-shot shift on this
+         *   very letter - and the key captions are drawn from the shift state. If
+         *   the captions are not redrawn here, the keys stay upper case after the
+         *   state has already gone back to off, i.e. the keyboard looks locked
+         *   although the next letter typed is lower case.
          */
-        ime_session_push_letter(key->label[0]);
+        {
+            const ime_shift_t before = ime_session_shift();
+            ime_session_push_letter(key->label[0]);
+            if (ime_session_shift() != before) {
+                ime_ui_rebuild_keyboard(ctx);
+            }
+        }
         break;
 
     case IME_KEY_DIGIT:

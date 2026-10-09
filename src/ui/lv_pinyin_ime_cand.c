@@ -81,6 +81,36 @@ void ime_ui_build_candidates(lv_pinyin_ime_ctx_t *ctx)
 
     ctx->page_prev = make_pager(ctx->cand_bar, ctx, "<", -1);
 
+    /*
+     * Pinyin chip: the syllables being composed ("ni'hao'ma"), shown at the left
+     * of the candidate bar and hidden whenever the buffer is empty (the flex
+     * layout skips hidden children, so an empty buffer costs no width at all).
+     *
+     * ★ It is a normal child of the *bar*, not a floating label of the widget.
+     *   Two reasons, both learned the hard way:
+     *   1) the bar has a fixed height, so the chip can never change the widget's
+     *      height - a chip that hangs above the bar needs reserved space, and that
+     *      space shows up as an empty grey band across the top of the keyboard;
+     *   2) LV_OBJ_FLAG_IGNORE_LAYOUT only keeps a child out of the *layout*, NOT
+     *      out of calc_content_height() (that one skips HIDDEN and FLOATING
+     *      only). A positioned-outside child of an LV_SIZE_CONTENT parent
+     *      therefore feeds its own position back into the parent's size, and
+     *      lv_obj_update_layout()'s `while(scr->scr_layout_inv)` has no iteration
+     *      limit - the widget can end up re-laying out forever and starve the
+     *      task watchdog.
+     */
+    ctx->chip = lv_label_create(ctx->cand_bar);
+    lv_label_set_text(ctx->chip, "");
+    ime_style_apply_chip(ctx->chip);
+    ime_style_apply_font(ctx->chip, ime_font_small());
+    lv_obj_remove_flag(ctx->chip, LV_OBJ_FLAG_CLICKABLE);
+    /* Cap it: a long buffer ("zhonghuarenmingongheguo") would otherwise eat the
+     * room the candidates need. Truncation with "..." is fine here - the whole
+     * point of the chip is showing roughly what is being composed. */
+    lv_label_set_long_mode(ctx->chip, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_max_width(ctx->chip, LV_PCT(45), LV_PART_MAIN);
+    lv_obj_add_flag(ctx->chip, LV_OBJ_FLAG_HIDDEN);
+
     ctx->cand_row = lv_obj_create(ctx->cand_bar);
     lv_obj_remove_style_all(ctx->cand_row);
     lv_obj_set_flex_grow(ctx->cand_row, 1);
@@ -109,15 +139,6 @@ void ime_ui_build_candidates(lv_pinyin_ime_ctx_t *ctx)
     }
 
     ctx->page_next = make_pager(ctx->cand_bar, ctx, ">", 1);
-
-    /* Floating pinyin chip: it hangs off the top left corner of the bar and is
-     * hidden whenever the buffer is empty. */
-    ctx->chip = lv_label_create(ctx->obj);
-    lv_label_set_text(ctx->chip, "");
-    ime_style_apply_chip(ctx->chip);
-    ime_style_apply_font(ctx->chip, ime_font_small());
-    lv_obj_align_to(ctx->chip, ctx->cand_bar, LV_ALIGN_OUT_TOP_LEFT, 2, -1);
-    lv_obj_add_flag(ctx->chip, LV_OBJ_FLAG_HIDDEN);
 
     /* 9-key pinyin row. */
     ctx->t9_row = lv_obj_create(ctx->obj);
@@ -155,12 +176,16 @@ void ime_ui_refresh_candidates(lv_pinyin_ime_ctx_t *ctx)
     const char *pinyin = ime_session_pinyin();
     bool has_input = (pinyin != NULL && pinyin[0] != '\0');
 
-    if (has_input) {
+    /*
+     * The chip belongs to the 26-key layout only: the 9-key layout shows the
+     * syllables in its own pinyin row, and showing both would print the same
+     * thing twice.
+     */
+    if (has_input && ctx->mode == IME_MODE_K26) {
         /* Show the syllables apart: "la'wan'le" rather than "lawanle". */
         ime_session_pinyin_display(ctx->pinyin_text, sizeof(ctx->pinyin_text));
         lv_label_set_text(ctx->chip, ctx->pinyin_text);
         lv_obj_remove_flag(ctx->chip, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_align_to(ctx->chip, ctx->cand_bar, LV_ALIGN_OUT_TOP_LEFT, 2, -1);
     } else {
         lv_obj_add_flag(ctx->chip, LV_OBJ_FLAG_HIDDEN);
     }
@@ -193,11 +218,28 @@ void ime_ui_refresh_t9(lv_pinyin_ime_ctx_t *ctx)
     size_t count = k9 ? ime_session_t9_pinyin_count() : 0;
     size_t selected = ime_session_t9_selected();
 
-    if (!k9 || !ctx->t9_row_visible) {
-        lv_obj_add_flag(ctx->t9_row, LV_OBJ_FLAG_HIDDEN);
+    /*
+     * The row only exists when it has something to show. It is one row tall and
+     * transparent, so an empty one is just a band of keyboard background in the
+     * middle of the layout - which is exactly what the 9-key layout used to show
+     * before the first digit was typed.
+     *
+     * Showing/hiding it changes the row count, so the fit-to-height maths has to
+     * be redone (that is what keeps the widget from growing past its target).
+     */
+    const bool want = k9 && ctx->t9_row_visible && count > 0;
+    const bool shown = !lv_obj_has_flag(ctx->t9_row, LV_OBJ_FLAG_HIDDEN);
+    if (want != shown) {
+        if (want) {
+            lv_obj_remove_flag(ctx->t9_row, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(ctx->t9_row, LV_OBJ_FLAG_HIDDEN);
+        }
+        ime_ui_apply_sizes(ctx);
+    }
+    if (!want) {
         return;
     }
-    lv_obj_remove_flag(ctx->t9_row, LV_OBJ_FLAG_HIDDEN);
 
     for (size_t i = 0; i < IME_UI_T9_PINYIN_MAX; i++) {
         if (i < count) {

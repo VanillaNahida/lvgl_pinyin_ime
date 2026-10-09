@@ -90,9 +90,18 @@ void ime_style_init(void)
     lv_style_set_bg_opa(&s_key, LV_OPA_COVER);
     lv_style_set_text_color(&s_key, IME_COLOR_TEXT);
 
-    /* Pressed keys keep the outline; only the fill changes. */
+    /*
+     * Pressed keys keep the outline; only the fill changes.
+     *
+     * ★ bg_opa must be set here even though the bases already have it: a style
+     *   only carries the properties it defines, and the candidate buttons sit on
+     *   a base whose bg_opa is TRANSP - so "pressed" only changed the colour of
+     *   a fully transparent background and candidates/chips had no press
+     *   feedback at all.
+     */
     init_key(&s_key_pressed);
     lv_style_set_bg_color(&s_key_pressed, IME_COLOR_KEY_DOWN);
+    lv_style_set_bg_opa(&s_key_pressed, LV_OPA_COVER);
 
     init_key(&s_key_special);
     lv_style_set_bg_color(&s_key_special, IME_COLOR_SPECIAL);
@@ -165,10 +174,15 @@ void ime_style_apply_key(lv_obj_t *btn, bool special)
      * call: local styles outrank every added style in LVGL's cascade, whatever
      * the state, so a local colour here would keep the caption dark in the
      * checked (caps lock) state and the highlight would only change the fill.
+     *
+     * Order matters as well: styles added later win, so the pressed style goes
+     * *after* the checked one - otherwise pressing a latched key (caps lock on)
+     * would keep showing the latched colour and the press would go unnoticed.
+     * The disabled style stays last: it outranks everything.
      */
     lv_obj_add_style(btn, special ? &s_key_special : &s_key, LV_PART_MAIN);
-    lv_obj_add_style(btn, &s_key_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_add_style(btn, &s_key_active, LV_PART_MAIN | LV_STATE_CHECKED);
+    lv_obj_add_style(btn, &s_key_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_add_style(btn, &s_key_disabled, LV_PART_MAIN | LV_STATE_DISABLED);
     lv_obj_set_style_text_align(btn, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 }

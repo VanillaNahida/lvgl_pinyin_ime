@@ -21,6 +21,25 @@ extern "C" {
 lv_obj_t *lv_pinyin_ime_create(lv_obj_t *parent);
 
 /**
+ * Draw the IME with the application's own fonts instead of the built-in ones.
+ *
+ * `big` is used for the candidates and the committed text, `small` for the key
+ * captions and the pinyin chip. Either may be NULL to keep the built-in font for
+ * that size.
+ *
+ * Why an application would want this: the fonts the component ships cover the
+ * character set tools/gen_charset.py picked (GB2312 plus a few UI symbols). A
+ * caption outside that set draws as the missing-glyph box - which looks wrong
+ * next to the rest of the UI, where the same character renders fine because the
+ * application carries its own, wider font.
+ *
+ * Like the row height, this is global state read when a widget is built: call it
+ * BEFORE lv_pinyin_ime_create(). A widget that already exists keeps its fonts
+ * until its keyboard is rebuilt.
+ */
+void lv_pinyin_ime_set_fonts(const lv_font_t *big, const lv_font_t *small);
+
+/**
  * Override the height of one key row / candidate row, in pixels.
  *
  * The keyboard is laid out as fixed-height rows, so the widget's total height is

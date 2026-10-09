@@ -11,7 +11,22 @@
  *
  *   cmake -S test_apps/host_ui_render -B build/host_ui_render -G Ninja
  *   cmake --build build/host_ui_render
- *   ./build/host_ui_render/host_ui_render out.ppm [k26|k9|p1|en]
+ *   ./build/host_ui_render/host_ui_render out.ppm [k26|k9|p1|en] [拼音| -] [动作| -]
+ *
+ * The third argument types lower-case letters through the session (so candidates
+ * and the pinyin chip appear); the fourth drives one interaction and *asserts*
+ * its result (the exit code is non-zero on failure):
+ *
+ *   shift    English: the caps-lock key is a one-shot, and it must return to off
+ *            after the first letter; Chinese: the key must do nothing at all
+ *   shift2   English: the second press locks, every letter is upper case
+ *   hold     hold the backspace key: the "左滑清空输入框" hint has to appear
+ *   clear    hold, then slide left past the hint: the text area is cleared
+ *
+ * PPM is not readable by most viewers; tools/ppm2png.py converts it (standard
+ * library only):
+ *
+ *   tools/venv/Scripts/python.exe tools/ppm2png.py out.ppm out.png
  */
 
 #include <stdio.h>
@@ -34,10 +49,22 @@
  * generated IME fonts, so the render shows real CJK glyphs; without it no font is
  * available and the widget falls back to LV_FONT_DEFAULT. */
 
-/** Find a key button by its action, for driving the widget from the test. */
-static lv_obj_t *find_key(lv_obj_t *ime, ime_key_action_t action)
+static int s_failures;
+
+static void check(bool ok, const char *what)
 {
-    lv_pinyin_ime_ctx_t *ctx = ime_ctx_get(ime);
+    printf("  [%s] %s\n", ok ? "ok" : "FAIL", what);
+    if (!ok) {
+        s_failures++;
+    }
+}
+
+/**
+ * Find a key button: by action, and for IME_KEY_LETTER also by its (always
+ * lower-case) label. `letter == '\0'` matches any letter key.
+ */
+static lv_obj_t *find_key_in(lv_pinyin_ime_ctx_t *ctx, ime_key_action_t action, char letter)
+{
     if (ctx == NULL || ctx->kb_rows == NULL) {
         return NULL;
     }
@@ -48,20 +75,42 @@ static lv_obj_t *find_key(lv_obj_t *ime, ime_key_action_t action)
         for (uint32_t k = 0; k < keys; k++) {
             lv_obj_t *btn = lv_obj_get_child(row, k);
             const ime_key_t *key = lv_obj_get_user_data(btn);
-            if (key != NULL && key->action == action) {
-                return btn;
+            if (key == NULL || key->action != action) {
+                continue;
             }
+            if (letter != '\0' && key->label[0] != letter) {
+                continue;
+            }
+            return btn;
         }
     }
     return NULL;
 }
 
-/** Type a lower-case pinyin/ASCII string through the real key dispatch path. */
+/** Find a non-letter key (shift, backspace, ...) by its action. */
+static lv_obj_t *find_key(lv_obj_t *ime, ime_key_action_t action)
+{
+    return find_key_in(ime_ctx_get(ime), action, '\0');
+}
+
+/** Find a letter key by its (lower-case) label. */
+static lv_obj_t *find_letter_key(lv_obj_t *ime, char letter)
+{
+    return find_key_in(ime_ctx_get(ime), IME_KEY_LETTER, letter);
+}
+
+/** Type a pinyin/ASCII string through the real key dispatch path. Digits drive
+ * the 9-key path (e.g. "64" = ni), letters the 26-key one. */
 static void type_text(lv_obj_t *ime, const char *text)
 {
     for (const char *p = text; *p != '\0'; p++) {
         if (*p == '\'') {
             ime_session_push_separator();
+            continue;
+        }
+        if (*p >= '2' && *p <= '9') {
+            /* The digit is passed as a character (ime_t9_push_digit wants '2'..'9'). */
+            ime_session_t9_push_digit(*p);
             continue;
         }
         ime_session_push_letter(*p);
@@ -231,16 +280,35 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(action, "shift") == 0 || strcmp(action, "shift2") == 0) {
+        const bool en = (strcmp(mode, "en") == 0);
         lv_obj_t *shift = find_key(ime, IME_KEY_SHIFT);
         printf("shift key: %p\n", (void *)shift);
         if (shift != NULL) {
             lv_obj_send_event(shift, LV_EVENT_CLICKED, NULL);
-            if (strcmp(action, "shift2") == 0) {
-                lv_obj_send_event(shift, LV_EVENT_CLICKED, NULL);
+            printf("shift state after 1 press: %d\n", (int)ime_session_shift());
+            if (en) {
+                check(ime_session_shift() == IME_SHIFT_ONCE,
+                      "English: first press is a one-shot shift");
+            } else {
+                check(ime_session_shift() == IME_SHIFT_OFF,
+                      "Chinese: the caps-lock key does nothing");
             }
         }
-        /* One shot / lock: type one letter so a one-shot is consumed. */
+        if (strcmp(action, "shift2") == 0) {
+            /* ★ The click rebuilds the key rows, so the old pointer is gone:
+             *   look the key up again instead of reusing it. */
+            shift = find_key(ime, IME_KEY_SHIFT);
+            if (shift != NULL) {
+                lv_obj_send_event(shift, LV_EVENT_CLICKED, NULL);
+                printf("shift state after 2 presses: %d\n", (int)ime_session_shift());
+                check(ime_session_shift() == IME_SHIFT_LOCK,
+                      "second press locks the shift");
+            }
+        }
+        /* Type one letter at a time, draining the commit in between exactly like
+         * the real key handler does (the session keeps a single pending commit). */
         ime_session_push_letter('a');
+        ime_ui_commit_pending(ime_ctx_get(ime));
         ime_session_push_letter('b');
         ime_ui_commit_pending(ime_ctx_get(ime));
         /* Rebuild so the render shows the captions the state resolves to now. */
@@ -248,6 +316,33 @@ int main(int argc, char **argv)
         ime_ui_refresh_all(ime_ctx_get(ime));
         printf("shift state after typing: %d (0=off 1=once 2=lock), textarea=\"%s\"\n",
                (int)ime_session_shift(), lv_textarea_get_text(ta));
+
+        if (en) {
+            const char *txt = lv_textarea_get_text(ta);
+            if (strcmp(action, "shift") == 0) {
+                /*
+                 * ★ The regression that started this: a one-shot shift has to be
+                 *   spent by the first letter AND put the state back to off.
+                 *   Leaving it at ONCE made the keyboard look locked for good.
+                 */
+                check(strcmp(txt, "Ab") == 0, "one-shot: first letter upper, rest lower");
+                check(ime_session_shift() == IME_SHIFT_OFF,
+                      "one-shot: shift returns to off after the letter");
+            } else {
+                check(strcmp(txt, "AB") == 0, "caps lock: every letter upper");
+                check(ime_session_shift() == IME_SHIFT_LOCK,
+                      "caps lock: state stays locked");
+            }
+
+            /* The shift key must be latched (highlighted) whenever it changes
+             * what a letter produces, and plain otherwise. */
+            lv_obj_t *key = find_key(ime, IME_KEY_SHIFT);
+            const bool want_latched = (strcmp(action, "shift") != 0);
+            check(key != NULL &&
+                      lv_obj_has_state(key, LV_STATE_CHECKED) == want_latched,
+                  want_latched ? "caps lock highlights the shift key"
+                               : "after the one-shot is spent the key is plain again");
+        }
     }
 
     if (strcmp(action, "hold") == 0) {
@@ -259,6 +354,9 @@ int main(int argc, char **argv)
         printf("hint visible: %d, drag needed: %d px\n",
                lv_obj_is_visible(ime_ctx_get(ime)->bksp_hint),
                (int)ime_ctx_get(ime)->bksp_drag_px);
+        check(lv_obj_is_visible(ime_ctx_get(ime)->bksp_hint),
+              "holding backspace shows the slide-to-clear hint");
+        check(ime_ctx_get(ime)->bksp_drag_px > 0, "the hint sets a slide distance");
     }
 
     if (strcmp(action, "clear") == 0) {
@@ -269,9 +367,110 @@ int main(int argc, char **argv)
         int32_t need = ctx->bksp_drag_px;
         ime_ui_bksp_hold_move(ctx, 300 - (need / 2));
         printf("textarea after half the slide: \"%s\"\n", lv_textarea_get_text(ta));
+        check(strcmp(lv_textarea_get_text(ta), "abcdef") == 0,
+              "half a slide does not clear");
         ime_ui_bksp_hold_move(ctx, 300 - need - 5);
         printf("textarea after the full slide: \"%s\"\n", lv_textarea_get_text(ta));
+        check(lv_textarea_get_text(ta)[0] == '\0', "a full slide clears the input box");
         ime_ui_bksp_hold_end(ctx);
+        check(!lv_obj_is_visible(ctx->bksp_hint), "the hint goes away with the finger");
+    }
+
+    if (strcmp(action, "oneshot") == 0) {
+        /*
+         * The whole English one-shot path driven through the *UI*, which is where
+         * the caption bug lived: press shift (one-shot), then tap a letter.
+         * The session spends the shift on that letter, and the key captions have
+         * to follow - otherwise the keyboard keeps showing upper case while the
+         * next letter typed would be lower case.
+         */
+        lv_obj_t *shift = find_key(ime, IME_KEY_SHIFT);
+        if (shift != NULL) {
+            lv_obj_send_event(shift, LV_EVENT_CLICKED, NULL);
+        }
+        check(ime_session_shift() == IME_SHIFT_ONCE, "shift armed as a one-shot");
+
+        lv_obj_t *a = find_letter_key(ime, 'a');
+        check(a != NULL, "found the 'a' key");
+        if (a != NULL) {
+            lv_obj_send_event(a, LV_EVENT_CLICKED, NULL);
+        }
+
+        const char *txt = lv_textarea_get_text(ta);
+        printf("textarea=\"%s\" shift=%d\n", txt, (int)ime_session_shift());
+        check(strcmp(txt, "A") == 0, "the one-shot letter came out upper case");
+        check(ime_session_shift() == IME_SHIFT_OFF, "the one-shot was spent");
+
+        /* ★ The captions must be lower case again. The click rebuilds the key
+         *   rows, so every pointer has to be looked up again. */
+        lv_obj_t *q = find_letter_key(ime, 'q');
+        const char *cap = (q != NULL && lv_obj_get_child_count(q) > 0)
+                              ? lv_label_get_text(lv_obj_get_child(q, 0))
+                              : NULL;
+        printf("'q' caption after the one-shot: \"%s\"\n", cap != NULL ? cap : "(none)");
+        check(cap != NULL && strcmp(cap, "q") == 0,
+              "key captions went back to lower case");
+        shift = find_key(ime, IME_KEY_SHIFT);
+        check(shift != NULL && !lv_obj_has_state(shift, LV_STATE_CHECKED),
+              "the shift key is no longer highlighted");
+    }
+
+    if (strcmp(action, "press") == 0) {
+        /*
+         * Pressed feedback. Three cases at once, because they used to differ:
+         *   - a candidate (base style has a transparent background)
+         *   - a letter key (base style has the opaque key fill)
+         *   - the shift key, latched (caps lock) *and* pressed
+         * The first one is the regression: the pressed style only set a colour,
+         * not bg_opa, so a candidate never changed appearance when tapped.
+         */
+        lv_pinyin_ime_ctx_t *ctx = ime_ctx_get(ime);
+        lv_obj_t *cand = NULL;
+        for (size_t i = 0; i < IME_UI_CAND_MAX; i++) {
+            if (ctx->cand_btns[i] != NULL &&
+                !lv_obj_has_flag(ctx->cand_btns[i], LV_OBJ_FLAG_HIDDEN)) {
+                cand = ctx->cand_btns[i];
+                break;
+            }
+        }
+        if (cand != NULL) {
+            lv_obj_add_state(cand, LV_STATE_PRESSED);
+        }
+
+        lv_obj_t *letter = NULL;
+        for (uint32_t r = 0; r < lv_obj_get_child_count(ctx->kb_rows); r++) {
+            lv_obj_t *row = lv_obj_get_child(ctx->kb_rows, r);
+            for (uint32_t k = 0; k < lv_obj_get_child_count(row); k++) {
+                lv_obj_t *btn = lv_obj_get_child(row, k);
+                const ime_key_t *key = lv_obj_get_user_data(btn);
+                if (key != NULL && key->action == IME_KEY_LETTER && key->label[0] == 'q') {
+                    letter = btn;
+                }
+            }
+        }
+        if (letter != NULL) {
+            lv_obj_add_state(letter, LV_STATE_PRESSED);
+        }
+
+        lv_obj_t *shift = find_key(ime, IME_KEY_SHIFT);
+        if (shift != NULL) {
+            lv_obj_add_state(shift, LV_STATE_CHECKED);
+            lv_obj_add_state(shift, LV_STATE_PRESSED);
+        }
+
+        /* The resolved style of the pressed state decides whether anything is
+         * actually drawn; a colour with a transparent background is invisible. */
+        const bool cn = (strcmp(mode, "en") != 0);
+        check(cand == NULL || lv_obj_get_style_bg_opa(cand, LV_PART_MAIN) > LV_OPA_MIN,
+              "a pressed candidate has an opaque background");
+        if (cn) {
+            /* English letters commit straight away, so there is no candidate row
+             * to press there - only Chinese input produces candidates. */
+            check(cand != NULL, "there was a visible candidate to press");
+        }
+        check(letter != NULL &&
+                  lv_obj_get_style_bg_opa(letter, LV_PART_MAIN) > LV_OPA_MIN,
+              "a pressed letter key has an opaque background");
     }
 
     lv_obj_update_layout(scr);
@@ -304,6 +503,8 @@ int main(int argc, char **argv)
     ppm_from_snapshot(snap, out);
     lv_draw_buf_destroy(snap);
 
-    printf("RESULT: %s\n", visible > 0 ? "objects are laid out" : "NOTHING VISIBLE");
-    return visible > 0 ? 0 : 1;
+    printf("RESULT: %s (%d check failure(s))\n",
+           (visible > 0 && s_failures == 0) ? "objects are laid out" : "FAILURES",
+           s_failures);
+    return (visible > 0 && s_failures == 0) ? 0 : 1;
 }

@@ -30,11 +30,27 @@ extern "C" {
 /**
  * Load the fonts from the configured source.
  *
- * Safe to call more than once, and safe to fail.
+ * Safe to call more than once, and safe to fail. Does nothing when an override
+ * was set with ime_font_set_override(): the application's fonts win.
  *
  * @return true when at least the big font was loaded
  */
 bool ime_font_init(void);
+
+/**
+ * Use fonts owned by the application instead of the ones the component ships.
+ *
+ * An application that already carries a CJK font (a whole-UI bitmap font, say)
+ * should prefer it: the generated fonts only cover the character set that
+ * tools/gen_charset.py selected, so a caption outside that set renders as the
+ * missing-glyph box even though the very same character is fine everywhere else
+ * in the UI.
+ *
+ * Either pointer may be NULL to keep the built-in font for that size. Call this
+ * before ime_font_init() / lv_pinyin_ime_create() - a widget that is already
+ * built keeps the font it was created with until its keyboard is rebuilt.
+ */
+void ime_font_set_override(const lv_font_t *big, const lv_font_t *small);
 
 /** Destroy the loaded fonts. */
 void ime_font_deinit(void);

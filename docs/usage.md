@@ -298,6 +298,29 @@ lv_pinyin_ime_set_lang(ime, LV_PINYIN_IME_LANG_CN);             /* 中文 / 英�
 lv_obj_add_event_cb(ime, on_ready, lv_pinyin_ime_event_ready(), NULL);
 ```
 
+### 7.1 用应用自己的字库（推荐，字更全）
+
+组件自带的两套字体只覆盖 `tools/gen_charset.py` 选出的字符集（GB2312 + 十来个
+UI 符号），键盘上的说明文字一旦超出这个集合就是**缺字方框** —— 而同一个字在别的
+页面（用应用自己的字库）显示得好好的，看着就像"输入法的字库坏了"。
+
+应用如果已经有 CJK 字库（整机 UI 位图字体、FreeType 字体……），直接让输入法用它：
+
+```c
+/* 必须在任何 lv_pinyin_ime_create() 之前调用 */
+
+/* IDF 里通常要等 ui_font_init() 跑完再取这个指针 */
+lv_pinyin_ime_set_fonts(UI_FONT_TEXT, UI_FONT_TEXT);   /* big(候选/上屏) / small(键面) */
+```
+
+两个参数都可以传 `NULL` 表示"这个尺寸继续用自带的"。字体是**建控件时**读的
+（和 `lv_pinyin_ime_set_row_height()` 一个道理），已经建出来的控件要等下次重建
+键盘才会换。
+
+用了这个之后，`generated/lv_font_ime_*.c` 那两套（约 2.4 MB）就成了死重量；
+需要省 flash 的话把 `LV_PINYIN_IME_FONT_SRC_*` 换掉即可（记得同时提供字体，
+否则会退回 `LV_FONT_DEFAULT`，中文会全是方框）。
+
 分区表、词库、字体的接入细节见 [integration.md](./integration.md)。
 
 ---
@@ -312,8 +335,7 @@ lv_obj_add_event_cb(ime, on_ready, lv_pinyin_ime_event_ready(), NULL);
 | `LV_PINYIN_IME_DOUBLE_SCHEME` | 小鹤 | 双拼方案（自然码/微软/ABC/紫光/拼音加加） |
 | `LV_PINYIN_IME_ASSOC_DEFAULT` | 开 | 联想 |
 | `LV_PINYIN_IME_FUZZY_DEFAULT` | 关 | 模糊音 |
-| `LV_PINYIN_IME_CAND_PAGE_SIZE` | 8 | 每页候选数 |
-| `LV_PINYIN_IME_DICT_SRC` | 分区 | 词库来源：分区 / SD 卡 / 内嵌 |
+| `LV_PINYIN_IME_CAND_PAGE_SIZE` | 8 | 每页候选数（可见候选按键盘宽度平分整行，右侧不留空；翻页仍由候选栏两端箭头负责） || `LV_PINYIN_IME_DICT_SRC` | 分区 | 词库来源：分区 / SD 卡 / 内嵌 |
 | `LV_PINYIN_IME_EXT_DICT_ENABLE` | 关 | SD 卡扩展词库 |
 
 完整列表见 [Kconfig](../Kconfig)。
