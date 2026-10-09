@@ -246,27 +246,43 @@ ime_change_t ime_session_push_letter(char ch)
         return IME_CHANGE_NONE;
     }
 
-    bool upper = false;
+    /* A caller may hand over either case; the shift state decides the final one. */
+    bool explicit_upper = false;
     if (ch >= 'A' && ch <= 'Z') {
-        upper = true;
+        explicit_upper = true;
         ch = (char)(ch - 'A' + 'a');
     }
     if (ch < 'a' || ch > 'z') {
         return IME_CHANGE_NONE;
     }
 
-    if (s_ime.one_shot_shift) {
-        upper = true;
+    /*
+     * Chinese: the letter only feeds the pinyin buffer, which is lower case by
+     * definition, so shift has no effect here at all - that is what makes the
+     * caps-lock key inert on the Chinese keyboard.
+     */
+    if (s_ime.lang != IME_LANG_EN) {
+        return push_pinyin_char(ch);
+    }
+
+    /*
+     * English: the shift state is the single source of truth for the case.
+     *
+     * ★ A one-shot shift has to put `shift` back to OFF here, not just clear
+     *   `one_shot_shift`: the UI renders the key captions from ime_session_shift(),
+     *   so leaving it at ONCE makes the keyboard look "stuck in caps" after the
+     *   first letter even though the following letters are already lower case
+     *   (reported as "one-shot shift never reverts").
+     */
+    const bool upper = explicit_upper || (s_ime.shift != IME_SHIFT_OFF);
+    if (s_ime.shift == IME_SHIFT_ONCE) {
+        s_ime.shift = IME_SHIFT_OFF;
         s_ime.one_shot_shift = false;
     }
 
-    if (s_ime.lang == IME_LANG_EN) {
-        char text[2] = {(char)(upper ? (ch - 'a' + 'A') : ch), '\0'};
-        set_commit(text);
-        return IME_CHANGE_COMMIT;
-    }
-
-    return push_pinyin_char(ch);
+    char text[2] = {(char)(upper ? (ch - 'a' + 'A') : ch), '\0'};
+    set_commit(text);
+    return IME_CHANGE_COMMIT;
 }
 
 ime_change_t ime_session_push_separator(void)

@@ -49,6 +49,7 @@
 static lv_style_t s_key;
 static lv_style_t s_key_pressed;
 static lv_style_t s_key_special;
+static lv_style_t s_key_active;
 static lv_style_t s_key_disabled;
 static lv_style_t s_label;
 static lv_style_t s_cand_btn;
@@ -97,6 +98,18 @@ void ime_style_init(void)
     lv_style_set_bg_color(&s_key_special, IME_COLOR_SPECIAL);
     lv_style_set_text_color(&s_key_special, IME_COLOR_TEXT);
 
+    /*
+     * Latched key (LV_STATE_CHECKED): the shift key while caps lock is on. The
+     * accent fill is the same blue the candidate bar uses for the selected
+     * candidate, so "this key is currently doing something" reads the same
+     * everywhere in the widget.
+     */
+    init_key(&s_key_active);
+    lv_style_set_bg_color(&s_key_active, IME_COLOR_ACCENT);
+    lv_style_set_bg_opa(&s_key_active, LV_OPA_COVER);
+    lv_style_set_border_color(&s_key_active, IME_COLOR_ACCENT);
+    lv_style_set_text_color(&s_key_active, IME_COLOR_CHIP_TEXT);
+
     init_key(&s_key_disabled);
     lv_style_set_bg_color(&s_key_disabled, IME_COLOR_KEY_GREY);
     lv_style_set_text_color(&s_key_disabled, IME_COLOR_MUTED);
@@ -110,6 +123,16 @@ void ime_style_init(void)
     lv_style_set_text_color(&s_cand_btn, IME_COLOR_TEXT);
     lv_style_set_pad_hor(&s_cand_btn, 4);
     lv_style_set_pad_ver(&s_cand_btn, 2);
+    /*
+     * Every visible candidate shares the row width, so the bar is filled edge to
+     * edge instead of leaving the right half empty (the row width follows the
+     * keyboard, so this is what makes the candidates adapt to it). Setting it
+     * here rather than with lv_obj_set_flex_grow() at build time matters:
+     * ime_style_apply_candidate() starts with lv_obj_remove_style_all(), which
+     * would wipe a locally set grow on every refresh. Hidden candidates are
+     * skipped by the flex layout, so the count on screen never matters.
+     */
+    lv_style_set_flex_grow(&s_cand_btn, 1);
 
     init_common(&s_cand_selected);
     lv_style_set_bg_color(&s_cand_selected, IME_COLOR_ACCENT);
@@ -137,10 +160,16 @@ void ime_style_apply_key(lv_obj_t *btn, bool special)
 {
     ime_style_init();
     lv_obj_remove_style_all(btn);
+    /*
+     * Text colour comes from the style, never from a local lv_obj_set_style_*()
+     * call: local styles outrank every added style in LVGL's cascade, whatever
+     * the state, so a local colour here would keep the caption dark in the
+     * checked (caps lock) state and the highlight would only change the fill.
+     */
     lv_obj_add_style(btn, special ? &s_key_special : &s_key, LV_PART_MAIN);
     lv_obj_add_style(btn, &s_key_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_style(btn, &s_key_active, LV_PART_MAIN | LV_STATE_CHECKED);
     lv_obj_add_style(btn, &s_key_disabled, LV_PART_MAIN | LV_STATE_DISABLED);
-    lv_obj_set_style_text_color(btn, IME_COLOR_TEXT, LV_PART_MAIN);
     lv_obj_set_style_text_align(btn, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 }
 

@@ -172,10 +172,12 @@ def check_c_font(path: pathlib.Path) -> dict:
     # lv_font_conv 1.5.2 targets LVGL 8, and LVGL 9 changed what a font
     # descriptor has to say:
     #
-    #   * lv_font_fmt_txt_dsc_t gained `stride` and `are_glyphs_dynamic_loaded`.
-    #     The generator does not emit them, so they sit at whatever the
-    #     surrounding bytes happen to be. `are_glyphs_dynamic_loaded` being
-    #     non-zero makes LVGL treat glyph_bitmap as a loader object and crash.
+    #   * lv_font_fmt_txt_dsc_t gained `stride` in LVGL 9. The generator does
+    #     not emit it, so it sits at whatever the surrounding bytes happen to be.
+    #
+    # Note: LVGL 9.5 does NOT have an `are_glyphs_dynamic_loaded` field (it was
+    # removed again), so it must NOT be injected here - doing so fails to compile
+    # with "lv_font_fmt_txt_dsc_t has no member named 'are_glyphs_dynamic_loaded'".
     #
     # `bitmap_format`, by contrast, must be left EXACTLY as generated. The
     # generator emits RLE compressed bitmaps and writes 1 for that; LVGL 9's enum
@@ -195,7 +197,6 @@ def check_c_font(path: pathlib.Path) -> dict:
         line_end = text.find("\n", idx)
         text = (text[:line_end + 1]
                 + "    .stride = 0,\n"
-                + "    .are_glyphs_dynamic_loaded = false,\n"
                 + text[line_end + 1:])
 
     # `static_bitmap = 1` tells LVGL the bitmaps live in flash and can be handed

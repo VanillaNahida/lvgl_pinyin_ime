@@ -23,6 +23,8 @@
 #include "lvgl_pinyin_ime/lv_pinyin_ime.h"
 #include "core/ime_session.h"
 #include "data/ime_font.h"
+#include "ui/lv_pinyin_ime_internal.h"   /* key tables + the internal context, to drive keys */
+
 
 /* The host render links the real src/data/ime_dict.c, which reads the dictionary
  * straight from the file system when ESP_PLATFORM is not defined. Set IME_DICT to
@@ -31,6 +33,43 @@
  * src/data/ime_font.c is linked too: with -DIME_HOST_REAL_FONT it loads the
  * generated IME fonts, so the render shows real CJK glyphs; without it no font is
  * available and the widget falls back to LV_FONT_DEFAULT. */
+
+/** Find a key button by its action, for driving the widget from the test. */
+static lv_obj_t *find_key(lv_obj_t *ime, ime_key_action_t action)
+{
+    lv_pinyin_ime_ctx_t *ctx = ime_ctx_get(ime);
+    if (ctx == NULL || ctx->kb_rows == NULL) {
+        return NULL;
+    }
+    uint32_t rows = lv_obj_get_child_count(ctx->kb_rows);
+    for (uint32_t r = 0; r < rows; r++) {
+        lv_obj_t *row = lv_obj_get_child(ctx->kb_rows, r);
+        uint32_t keys = lv_obj_get_child_count(row);
+        for (uint32_t k = 0; k < keys; k++) {
+            lv_obj_t *btn = lv_obj_get_child(row, k);
+            const ime_key_t *key = lv_obj_get_user_data(btn);
+            if (key != NULL && key->action == action) {
+                return btn;
+            }
+        }
+    }
+    return NULL;
+}
+
+/** Type a lower-case pinyin/ASCII string through the real key dispatch path. */
+static void type_text(lv_obj_t *ime, const char *text)
+{
+    for (const char *p = text; *p != '\0'; p++) {
+        if (*p == '\'') {
+            ime_session_push_separator();
+            continue;
+        }
+        ime_session_push_letter(*p);
+    }
+    ime_ui_commit_pending(ime_ctx_get(ime));
+    ime_ui_refresh_all(ime_ctx_get(ime));
+    lv_obj_update_layout(ime);
+}
 
 static uint8_t s_buf[320 * 240 * 4];
 
@@ -140,6 +179,10 @@ int main(int argc, char **argv)
 {
     const char *out = (argc > 1) ? argv[1] : "ime_render.ppm";
     const char *mode = (argc > 2) ? argv[2] : "k26";
+    /* "-" means "none": shells drop empty arguments, so a placeholder keeps the
+     * positional arguments aligned. */
+    const char *pinyin = (argc > 3 && strcmp(argv[3], "-") != 0) ? argv[3] : "";
+    const char *action = (argc > 4 && strcmp(argv[4], "-") != 0) ? argv[4] : "";
 
     lv_init();
 
@@ -175,6 +218,60 @@ int main(int argc, char **argv)
         lv_pinyin_ime_set_panel(ime, LV_PINYIN_IME_PANEL_NUM_SYM);
     } else if (strcmp(mode, "en") == 0) {
         lv_pinyin_ime_set_lang(ime, LV_PINYIN_IME_LANG_EN);
+    }
+
+    /* Pre-fill the text area so the backspace and clear gestures have something
+     * to work on. */
+    if (strcmp(action, "hold") == 0 || strcmp(action, "clear") == 0) {
+        lv_textarea_set_text(ta, "abcdef");
+    }
+
+    if (pinyin[0] != '\0') {
+        type_text(ime, pinyin);
+    }
+
+    if (strcmp(action, "shift") == 0 || strcmp(action, "shift2") == 0) {
+        lv_obj_t *shift = find_key(ime, IME_KEY_SHIFT);
+        printf("shift key: %p\n", (void *)shift);
+        if (shift != NULL) {
+            lv_obj_send_event(shift, LV_EVENT_CLICKED, NULL);
+            if (strcmp(action, "shift2") == 0) {
+                lv_obj_send_event(shift, LV_EVENT_CLICKED, NULL);
+            }
+        }
+        /* One shot / lock: type one letter so a one-shot is consumed. */
+        ime_session_push_letter('a');
+        ime_session_push_letter('b');
+        ime_ui_commit_pending(ime_ctx_get(ime));
+        /* Rebuild so the render shows the captions the state resolves to now. */
+        ime_ui_rebuild_keyboard(ime_ctx_get(ime));
+        ime_ui_refresh_all(ime_ctx_get(ime));
+        printf("shift state after typing: %d (0=off 1=once 2=lock), textarea=\"%s\"\n",
+               (int)ime_session_shift(), lv_textarea_get_text(ta));
+    }
+
+    if (strcmp(action, "hold") == 0) {
+        /* Hold the backspace key: the hint pill has to appear. */
+        lv_obj_t *bksp = find_key(ime, IME_KEY_BACKSPACE);
+        printf("backspace key: %p\n", (void *)bksp);
+        lv_obj_send_event(bksp, LV_EVENT_PRESSED, NULL);
+        lv_obj_send_event(bksp, LV_EVENT_LONG_PRESSED, NULL);
+        printf("hint visible: %d, drag needed: %d px\n",
+               lv_obj_is_visible(ime_ctx_get(ime)->bksp_hint),
+               (int)ime_ctx_get(ime)->bksp_drag_px);
+    }
+
+    if (strcmp(action, "clear") == 0) {
+        /* Hold, then slide left past the pill: the text area has to be cleared. */
+        lv_pinyin_ime_ctx_t *ctx = ime_ctx_get(ime);
+        ime_ui_bksp_hold_begin(ctx, 300);
+        ime_ui_bksp_hold_arm(ctx);
+        int32_t need = ctx->bksp_drag_px;
+        ime_ui_bksp_hold_move(ctx, 300 - (need / 2));
+        printf("textarea after half the slide: \"%s\"\n", lv_textarea_get_text(ta));
+        ime_ui_bksp_hold_move(ctx, 300 - need - 5);
+        printf("textarea after the full slide: \"%s\"\n", lv_textarea_get_text(ta));
+        ime_ui_bksp_hold_end(ctx);
     }
 
     lv_obj_update_layout(scr);

@@ -57,7 +57,7 @@ static lv_obj_t *make_pager(lv_obj_t *parent, lv_pinyin_ime_ctx_t *ctx, const ch
     /* Style first, then size: ime_style_apply_key() calls
      * lv_obj_remove_style_all(), which clears local properties too. */
     ime_style_apply_key(btn, true);
-    lv_obj_set_size(btn, IME_UI_ROW_HEIGHT, LV_PCT(100));
+    lv_obj_set_size(btn, IME_UI_ROW_HEIGHT_PX, LV_PCT(100));
     lv_obj_set_user_data(btn, (void *)direction);
     lv_obj_add_event_cb(btn, page_click_cb, LV_EVENT_CLICKED, ctx);
 
@@ -72,12 +72,12 @@ void ime_ui_build_candidates(lv_pinyin_ime_ctx_t *ctx)
     ctx->cand_bar = lv_obj_create(ctx->obj);
     ime_style_apply_bar(ctx->cand_bar);
     lv_obj_set_width(ctx->cand_bar, LV_PCT(100));
-    lv_obj_set_height(ctx->cand_bar, IME_UI_ROW_HEIGHT);
+    lv_obj_set_height(ctx->cand_bar, IME_UI_ROW_HEIGHT_PX);
     lv_obj_set_flex_flow(ctx->cand_bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(ctx->cand_bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(ctx->cand_bar, 2, LV_PART_MAIN);
-    lv_obj_set_scrollable(ctx->cand_bar, false);
+    lv_obj_remove_flag(ctx->cand_bar, LV_OBJ_FLAG_SCROLLABLE);
 
     ctx->page_prev = make_pager(ctx->cand_bar, ctx, "<", -1);
 
@@ -89,7 +89,7 @@ void ime_ui_build_candidates(lv_pinyin_ime_ctx_t *ctx)
     lv_obj_set_flex_align(ctx->cand_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(ctx->cand_row, 2, LV_PART_MAIN);
-    lv_obj_set_scrollable(ctx->cand_row, false);
+    lv_obj_remove_flag(ctx->cand_row, LV_OBJ_FLAG_SCROLLABLE);
 
     for (size_t i = 0; i < IME_UI_CAND_MAX; i++) {
         lv_obj_t *btn = lv_button_create(ctx->cand_row);
@@ -99,7 +99,7 @@ void ime_ui_build_candidates(lv_pinyin_ime_ctx_t *ctx)
         lv_obj_set_width(btn, LV_SIZE_CONTENT);
         lv_obj_set_user_data(btn, (void *)(uintptr_t)i);
         lv_obj_add_event_cb(btn, cand_click_cb, LV_EVENT_CLICKED, ctx);
-        lv_obj_set_hidden(btn, true);
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
 
         lv_obj_t *label = lv_label_create(btn);
         lv_obj_center(label);
@@ -117,20 +117,20 @@ void ime_ui_build_candidates(lv_pinyin_ime_ctx_t *ctx)
     ime_style_apply_chip(ctx->chip);
     ime_style_apply_font(ctx->chip, ime_font_small());
     lv_obj_align_to(ctx->chip, ctx->cand_bar, LV_ALIGN_OUT_TOP_LEFT, 2, -1);
-    lv_obj_set_hidden(ctx->chip, true);
+    lv_obj_add_flag(ctx->chip, LV_OBJ_FLAG_HIDDEN);
 
     /* 9-key pinyin row. */
     ctx->t9_row = lv_obj_create(ctx->obj);
     lv_obj_remove_style_all(ctx->t9_row);
     lv_obj_set_width(ctx->t9_row, LV_PCT(100));
-    lv_obj_set_height(ctx->t9_row, IME_UI_ROW_HEIGHT);
+    lv_obj_set_height(ctx->t9_row, IME_UI_ROW_HEIGHT_PX);
     lv_obj_set_flex_flow(ctx->t9_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(ctx->t9_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(ctx->t9_row, 2, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(ctx->t9_row, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_scrollable(ctx->t9_row, false);
-    lv_obj_set_hidden(ctx->t9_row, true);
+    lv_obj_remove_flag(ctx->t9_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(ctx->t9_row, LV_OBJ_FLAG_HIDDEN);
 
     for (size_t i = 0; i < IME_UI_T9_PINYIN_MAX; i++) {
         lv_obj_t *btn = lv_button_create(ctx->t9_row);
@@ -140,7 +140,7 @@ void ime_ui_build_candidates(lv_pinyin_ime_ctx_t *ctx)
         lv_obj_set_width(btn, LV_SIZE_CONTENT);
         lv_obj_set_user_data(btn, (void *)(uintptr_t)i);
         lv_obj_add_event_cb(btn, t9_click_cb, LV_EVENT_CLICKED, ctx);
-        lv_obj_set_hidden(btn, true);
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
 
         lv_obj_t *label = lv_label_create(btn);
         lv_obj_center(label);
@@ -159,10 +159,10 @@ void ime_ui_refresh_candidates(lv_pinyin_ime_ctx_t *ctx)
         /* Show the syllables apart: "la'wan'le" rather than "lawanle". */
         ime_session_pinyin_display(ctx->pinyin_text, sizeof(ctx->pinyin_text));
         lv_label_set_text(ctx->chip, ctx->pinyin_text);
-        lv_obj_set_hidden(ctx->chip, false);
+        lv_obj_remove_flag(ctx->chip, LV_OBJ_FLAG_HIDDEN);
         lv_obj_align_to(ctx->chip, ctx->cand_bar, LV_ALIGN_OUT_TOP_LEFT, 2, -1);
     } else {
-        lv_obj_set_hidden(ctx->chip, true);
+        lv_obj_add_flag(ctx->chip, LV_OBJ_FLAG_HIDDEN);
     }
 
     size_t count = ime_session_candidate_count();
@@ -173,12 +173,12 @@ void ime_ui_refresh_candidates(lv_pinyin_ime_ctx_t *ctx)
         const char *text = (i < count) ? ime_session_candidate(page_start + i) : NULL;
 
         if (text == NULL) {
-            lv_obj_set_hidden(ctx->cand_btns[i], true);
+            lv_obj_add_flag(ctx->cand_btns[i], LV_OBJ_FLAG_HIDDEN);
             continue;
         }
 
         lv_label_set_text(ctx->cand_labels[i], text);
-        lv_obj_set_hidden(ctx->cand_btns[i], false);
+        lv_obj_remove_flag(ctx->cand_btns[i], LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_user_data(ctx->cand_btns[i], (void *)(uintptr_t)(page_start + i));
         ime_style_apply_candidate(ctx->cand_btns[i], page_start + i == selected);
     }
@@ -194,19 +194,19 @@ void ime_ui_refresh_t9(lv_pinyin_ime_ctx_t *ctx)
     size_t selected = ime_session_t9_selected();
 
     if (!k9 || !ctx->t9_row_visible) {
-        lv_obj_set_hidden(ctx->t9_row, true);
+        lv_obj_add_flag(ctx->t9_row, LV_OBJ_FLAG_HIDDEN);
         return;
     }
-    lv_obj_set_hidden(ctx->t9_row, false);
+    lv_obj_remove_flag(ctx->t9_row, LV_OBJ_FLAG_HIDDEN);
 
     for (size_t i = 0; i < IME_UI_T9_PINYIN_MAX; i++) {
         if (i < count) {
             const char *py = ime_session_t9_pinyin(i);
             lv_label_set_text(ctx->t9_labels[i], py != NULL ? py : "");
-            lv_obj_set_hidden(ctx->t9_btns[i], false);
+            lv_obj_remove_flag(ctx->t9_btns[i], LV_OBJ_FLAG_HIDDEN);
             ime_style_apply_candidate(ctx->t9_btns[i], i == selected);
         } else {
-            lv_obj_set_hidden(ctx->t9_btns[i], true);
+            lv_obj_add_flag(ctx->t9_btns[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
 }

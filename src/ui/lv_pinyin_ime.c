@@ -26,6 +26,8 @@
 static const char *TAG = "lv_pinyin_ime";
 
 int IME_UI_UNIT_PX = 28;
+int IME_UI_ROW_HEIGHT_PX = IME_UI_ROW_HEIGHT_DEFAULT;
+int IME_UI_FIT_HEIGHT_PX = 0;
 
 static bool s_events_registered;
 static lv_event_code_t s_evt_ready;
@@ -87,6 +89,103 @@ static void update_unit_px(lv_obj_t *parent)
     IME_UI_UNIT_PX = unit;
 }
 
+/* Clamp range for lv_pinyin_ime_set_row_height(): below 16 px the glyphs no
+ * longer fit, above 256 px one row would fill a small screen on its own. */
+#define IME_UI_ROW_HEIGHT_MIN 16
+#define IME_UI_ROW_HEIGHT_MAX 256
+
+void lv_pinyin_ime_set_row_height(int px)
+{
+    if (px <= 0) {
+        IME_UI_ROW_HEIGHT_PX = IME_UI_ROW_HEIGHT_DEFAULT;
+        return;
+    }
+    if (px < IME_UI_ROW_HEIGHT_MIN) {
+        px = IME_UI_ROW_HEIGHT_MIN;
+    } else if (px > IME_UI_ROW_HEIGHT_MAX) {
+        px = IME_UI_ROW_HEIGHT_MAX;
+    }
+    IME_UI_ROW_HEIGHT_PX = px;
+}
+
+/* Clamp range for lv_pinyin_ime_set_fit_height(). */
+#define IME_UI_FIT_HEIGHT_MIN 96
+#define IME_UI_FIT_HEIGHT_MAX 720
+
+void lv_pinyin_ime_set_fit_height(int px)
+{
+    if (px <= 0) {
+        IME_UI_FIT_HEIGHT_PX = 0;
+        return;
+    }
+    if (px < IME_UI_FIT_HEIGHT_MIN) {
+        px = IME_UI_FIT_HEIGHT_MIN;
+    } else if (px > IME_UI_FIT_HEIGHT_MAX) {
+        px = IME_UI_FIT_HEIGHT_MAX;
+    }
+    IME_UI_FIT_HEIGHT_PX = px;
+}
+
+/*
+ * Fit sizing: derive the row height from the target total height and the
+ * *visible* rows, then apply it to the candidate bar, the 9-key pinyin row and
+ * every key row.
+ *
+ * The root is a flex column: pad_all 2 + 2 (top/bottom), pad_row 3 between its
+ * children (candidate bar, 9-key pinyin row when visible, key rows container).
+ * The key rows container is a flex column too: pad_row 3 between the key rows.
+ * Hidden children are skipped by the flex layout, so "visible rows" is exactly
+ * what the layout measures:
+ *
+ *   rows_total = 1 (cand bar) + (K9 && 选拼音 ? 1 : 0) + key_rows
+ *   fixed      = 4 + 3*(root_children - 1) + 3*(key_rows - 1)
+ *   row_height = (fit - fixed) / rows_total
+ *
+ * Called at create and after every rebuild, so mode / panel / language / T9
+ * switches keep the keyboard filling the same target height. The keys are sized
+ * by flex grow from the parent width, so scaling the row height scales the whole
+ * keyboard in both dimensions.
+ */
+void ime_ui_apply_sizes(lv_pinyin_ime_ctx_t *ctx)
+{
+    if (ctx == NULL || ctx->kb_rows == NULL || IME_UI_FIT_HEIGHT_PX <= 0) {
+        return;
+    }
+    const int fit = IME_UI_FIT_HEIGHT_PX;
+
+    const uint32_t key_rows = lv_obj_get_child_count(ctx->kb_rows);
+    const bool t9_visible = (ctx->mode == IME_MODE_K9) && ctx->t9_row_visible;
+    const uint32_t rows_total = 1u + (t9_visible ? 1u : 0u) + key_rows;
+    if (rows_total == 0) {
+        return;
+    }
+    const uint32_t root_children = 1u + (t9_visible ? 1u : 0u) + 1u; /* cand + t9? + kb_rows */
+    const uint32_t fixed = 4u                          /* root pad_all top+bottom */
+                         + 3u * (root_children - 1u)   /* root pad_row gaps */
+                         + 3u * (key_rows > 0 ? key_rows - 1u : 0u); /* kb_rows pad_row gaps */
+
+    int rh = (fit - (int)fixed) / (int)rows_total;
+    if (rh < IME_UI_ROW_HEIGHT_MIN) {
+        rh = IME_UI_ROW_HEIGHT_MIN;
+    } else if (rh > IME_UI_ROW_HEIGHT_MAX) {
+        rh = IME_UI_ROW_HEIGHT_MAX;
+    }
+    IME_UI_ROW_HEIGHT_PX = rh;   /* future rows (rebuilds) start from the derived height */
+
+    if (ctx->cand_bar != NULL) {
+        lv_obj_set_height(ctx->cand_bar, rh);
+    }
+    if (ctx->t9_row != NULL) {
+        lv_obj_set_height(ctx->t9_row, rh);
+    }
+    for (uint32_t r = 0; r < key_rows; r++) {
+        lv_obj_t *row = lv_obj_get_child(ctx->kb_rows, r);
+        if (row != NULL) {
+            lv_obj_set_height(row, rh);
+        }
+    }
+}
+
 lv_obj_t *lv_pinyin_ime_create(lv_obj_t *parent)
 {
     if (!ime_session_ready() && !ime_session_init()) {
@@ -108,9 +207,9 @@ lv_obj_t *lv_pinyin_ime_create(lv_obj_t *parent)
     ime_style_apply_root(ctx->obj);
     lv_obj_set_size(ctx->obj, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(ctx->obj, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_scrollable(ctx->obj, false);
+    lv_obj_remove_flag(ctx->obj, LV_OBJ_FLAG_SCROLLABLE);
     /* Only the keys swallow taps; the gaps have to fall through. */
-    lv_obj_set_clickable(ctx->obj, false);
+    lv_obj_remove_flag(ctx->obj, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_user_data(ctx->obj, ctx);
     lv_obj_add_event_cb(ctx->obj, ime_root_delete_cb, LV_EVENT_DELETE, ctx);
 
@@ -127,10 +226,11 @@ lv_obj_t *lv_pinyin_ime_create(lv_obj_t *parent)
     lv_obj_set_height(ctx->kb_rows, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(ctx->kb_rows, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(ctx->kb_rows, 3, LV_PART_MAIN);
-    lv_obj_set_scrollable(ctx->kb_rows, false);
-    lv_obj_set_clickable(ctx->kb_rows, false);
+    lv_obj_remove_flag(ctx->kb_rows, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(ctx->kb_rows, LV_OBJ_FLAG_CLICKABLE);
 
     ime_ui_rebuild_keyboard(ctx);
+    ime_ui_apply_sizes(ctx);     /* fit 模式：把行高按目标总高分摊到每一行 */
     ime_ui_refresh_all(ctx);
     return ctx->obj;
 }
@@ -186,9 +286,7 @@ void lv_pinyin_ime_set_lang(lv_obj_t *ime, lv_pinyin_ime_lang_t lang)
     if (ctx == NULL || lang >= LV_PINYIN_IME_LANG_LAST) {
         return;
     }
-    ctx->lang = (ime_lang_t)lang;
-    ime_session_set_lang((ime_lang_t)lang);
-    ime_ui_rebuild_keyboard(ctx);
+    ime_ui_set_lang(ctx, (ime_lang_t)lang);
     ime_ui_refresh_all(ctx);
 }
 
@@ -227,12 +325,12 @@ void lv_pinyin_ime_reset(lv_obj_t *ime)
 
 void lv_pinyin_ime_show(lv_obj_t *ime)
 {
-    lv_obj_set_hidden(ime, false);
+    lv_obj_remove_flag(ime, LV_OBJ_FLAG_HIDDEN);
 }
 
 void lv_pinyin_ime_hide(lv_obj_t *ime)
 {
-    lv_obj_set_hidden(ime, true);
+    lv_obj_add_flag(ime, LV_OBJ_FLAG_HIDDEN);
 }
 
 void lv_pinyin_ime_dump(lv_obj_t *ime)
@@ -377,6 +475,154 @@ void ime_ui_commit_pending(lv_pinyin_ime_ctx_t *ctx)
     }
 }
 
+/* ------------------------------------------------------- backspace behaviour */
+
+void ime_ui_backspace(lv_pinyin_ime_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return;
+    }
+    /*
+     * The session removes pinyin first and reports NONE once there is nothing
+     * left to remove; only then does the character in the text area go. Both the
+     * tap and the hold-to-repeat path come through here, so holding the key
+     * deletes one character at a time exactly like tapping it.
+     */
+    if (ime_session_backspace() == IME_CHANGE_NONE && ctx->ta != NULL) {
+        lv_textarea_delete_char(ctx->ta);
+    }
+}
+
+static void bksp_hint_ensure(lv_pinyin_ime_ctx_t *ctx)
+{
+    if (ctx->bksp_hint != NULL) {
+        return;
+    }
+    ctx->bksp_hint = lv_label_create(ctx->obj);
+    lv_label_set_text(ctx->bksp_hint, IME_UI_BKSP_HINT_TEXT);
+    ime_style_apply_chip(ctx->bksp_hint);
+    ime_style_apply_font(ctx->bksp_hint, ime_font_small());
+    lv_obj_add_flag(ctx->bksp_hint, LV_OBJ_FLAG_HIDDEN);
+    /* The root is a flex column: without this the hint would become a row of the
+     * keyboard and push everything else around. */
+    lv_obj_add_flag(ctx->bksp_hint, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_remove_flag(ctx->bksp_hint, LV_OBJ_FLAG_CLICKABLE);
+}
+
+void ime_ui_bksp_hold_begin(lv_pinyin_ime_ctx_t *ctx, int32_t finger_x)
+{
+    if (ctx == NULL) {
+        return;
+    }
+    ctx->bksp_press_x = finger_x;
+    ctx->bksp_hold = false;
+    ctx->bksp_cleared = false;
+    /* A new press starts a new decision about the release-time CLICKED. */
+    ctx->bksp_consumed = false;
+}
+
+void ime_ui_bksp_hold_arm(lv_pinyin_ime_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return;
+    }
+    ctx->bksp_hold = true;
+    ctx->bksp_cleared = false;
+    bksp_hint_ensure(ctx);
+
+    /*
+     * The pill sits in the top right corner of the widget, which is directly
+     * above the backspace key (it ends the first key row), and it grows to the
+     * left. Sliding the finger left by the width of the pill therefore puts it at
+     * the far end of the pill - the position the hint points at.
+     */
+    lv_obj_remove_flag(ctx->bksp_hint, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(ctx->bksp_hint, LV_ALIGN_TOP_RIGHT, -4, 4);
+    lv_obj_move_foreground(ctx->bksp_hint);
+    lv_obj_update_layout(ctx->bksp_hint);
+
+    int32_t need = (int32_t)lv_obj_get_width(ctx->bksp_hint) + 8;
+    if (need < IME_UI_BKSP_CLEAR_MIN) {
+        need = IME_UI_BKSP_CLEAR_MIN;
+    } else if (need > IME_UI_BKSP_CLEAR_MAX) {
+        need = IME_UI_BKSP_CLEAR_MAX;
+    }
+    ctx->bksp_drag_px = need;
+}
+
+void ime_ui_bksp_hold_move(lv_pinyin_ime_ctx_t *ctx, int32_t finger_x)
+{
+    if (ctx == NULL || !ctx->bksp_hold || ctx->bksp_cleared) {
+        return;
+    }
+    if (ctx->bksp_press_x - finger_x < ctx->bksp_drag_px) {
+        return;                 /* not far enough left yet */
+    }
+
+    ctx->bksp_cleared = true;
+    /*
+     * Clear the input box: the committed text and the composition buffer both
+     * belong to it, and leaving half typed pinyin behind would keep the
+     * candidate bar busy.
+     */
+    ime_session_reset();
+    if (ctx->ta != NULL) {
+        lv_textarea_set_text(ctx->ta, "");
+    }
+    if (ctx->bksp_hint != NULL) {
+        lv_obj_add_flag(ctx->bksp_hint, LV_OBJ_FLAG_HIDDEN);
+    }
+    ime_ui_refresh_all(ctx);
+}
+
+void ime_ui_bksp_hold_end(lv_pinyin_ime_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return;
+    }
+    ctx->bksp_hold = false;
+    ctx->bksp_cleared = false;
+    if (ctx->bksp_hint != NULL) {
+        lv_obj_add_flag(ctx->bksp_hint, LV_OBJ_FLAG_HIDDEN);
+    }
+    /*
+     * bksp_consumed is deliberately kept: LVGL sends CLICKED right after
+     * RELEASED, and that trailing event has to stay swallowed when the hold
+     * already deleted something.
+     */
+}
+
+bool ime_ui_bksp_take_consumed(lv_pinyin_ime_ctx_t *ctx)
+{
+    if (ctx == NULL || !ctx->bksp_consumed) {
+        return false;
+    }
+    ctx->bksp_consumed = false;
+    return true;
+}
+
+void ime_ui_set_lang(lv_pinyin_ime_ctx_t *ctx, ime_lang_t lang)
+{
+    if (ctx == NULL) {
+        return;
+    }
+    ctx->lang = lang;
+    ime_session_set_lang(lang);
+
+    /*
+     * Reset the shift state on every language change.
+     *
+     * The caps-lock key does nothing while Chinese is active (the letters are
+     * drawn upper case regardless), so a locked state left over from English
+     * could neither be seen nor cleared there - and it would suddenly apply
+     * again the next time English is selected. Dropping it keeps each language
+     * starting from the same, predictable state.
+     */
+    ime_session_set_shift(IME_SHIFT_OFF);
+
+    ime_ui_rebuild_keyboard(ctx);
+}
+
 void ime_ui_handle_key(lv_pinyin_ime_ctx_t *ctx, const ime_key_t *key)
 {
     if (ctx == NULL || key == NULL) {
@@ -384,15 +630,14 @@ void ime_ui_handle_key(lv_pinyin_ime_ctx_t *ctx, const ime_key_t *key)
     }
 
     switch (key->action) {
-    case IME_KEY_LETTER: {
-        char ch = key->label[0];
-        if (ime_session_shift() != IME_SHIFT_OFF) {
-            ch = (char)(ch - 'a' + 'A');
-        }
-        ime_session_push_letter(ch);
-        ime_session_take_one_shot_shift();
+    case IME_KEY_LETTER:
+        /*
+         * Always hand the lower-case letter over: the session owns the shift
+         * state machine and decides the case (English only), so the UI and the
+         * committed text cannot disagree about it.
+         */
+        ime_session_push_letter(key->label[0]);
         break;
-    }
 
     case IME_KEY_DIGIT:
         ime_session_t9_push_digit(ime_ui_digit_for_group(key->label));
@@ -407,9 +652,7 @@ void ime_ui_handle_key(lv_pinyin_ime_ctx_t *ctx, const ime_key_t *key)
         break;
 
     case IME_KEY_BACKSPACE:
-        if (ime_session_backspace() == IME_CHANGE_NONE && ctx->ta != NULL) {
-            lv_textarea_delete_char(ctx->ta);
-        }
+        ime_ui_backspace(ctx);
         break;
 
     case IME_KEY_ENTER:
@@ -447,6 +690,17 @@ void ime_ui_handle_key(lv_pinyin_ime_ctx_t *ctx, const ime_key_t *key)
         break;
 
     case IME_KEY_SHIFT:
+        /*
+         * The caps-lock key only means something in English: the Chinese
+         * keyboard always draws upper-case letters and the state has no effect
+         * there, so pressing it must not do anything either (a silent state
+         * change would come back to life after switching to English).
+         * Long press - the language switch - is handled in the key callbacks
+         * and stays available in both languages.
+         */
+        if (ctx->lang != IME_LANG_EN) {
+            break;
+        }
         ime_ui_cycle_shift(ctx);
         ime_ui_rebuild_keyboard(ctx);
         break;
@@ -460,8 +714,7 @@ void ime_ui_handle_key(lv_pinyin_ime_ctx_t *ctx, const ime_key_t *key)
         break;
 
     case IME_KEY_LANG:
-        ctx->lang = (ctx->lang == IME_LANG_CN) ? IME_LANG_EN : IME_LANG_CN;
-        ime_session_set_lang(ctx->lang);
+        ime_ui_set_lang(ctx, (ctx->lang == IME_LANG_CN) ? IME_LANG_EN : IME_LANG_CN);
         ctx->panel = LV_PINYIN_IME_PANEL_MAIN;
         ctx->panel_alt = false;
         ime_ui_rebuild_keyboard(ctx);
@@ -486,6 +739,8 @@ void ime_ui_handle_key(lv_pinyin_ime_ctx_t *ctx, const ime_key_t *key)
 
     case IME_KEY_T9_PINYIN:
         ctx->t9_row_visible = !ctx->t9_row_visible;
+        /* 可见行数变了：fit 模式下重新分摊行高，整块仍占目标高度 */
+        ime_ui_apply_sizes(ctx);
         break;
 
     case IME_KEY_NONE:
