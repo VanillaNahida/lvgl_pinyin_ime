@@ -45,17 +45,45 @@ typedef struct {
 } ime_session_t;
 
 static ime_session_t s_ime;
+/*
+ * 一屏能显示几个候选。默认取编译期的上限（Kconfig），UI 量过字宽之后会用
+ * ime_session_set_page_size() 调小 —— 长词（"中华人民共和国"）一个就顶六七个
+ * 单字，固定 8 个会把后面的候选挤出可视范围。
+ * 放在 s_ime 外面是故意的：换页面/清输入都不该把它重置掉。
+ */
+static size_t s_page_size = IME_SESSION_CAND_PAGE_SIZE;
 
 /* ------------------------------------------------------------------ helpers */
+
+static size_t page_size(void)
+{
+    return (s_page_size > 0) ? s_page_size : IME_SESSION_CAND_PAGE_SIZE;
+}
 
 static void window_refresh(void)
 {
     size_t remaining = (s_ime.cand_total > s_ime.page_start) ? s_ime.cand_total - s_ime.page_start : 0;
-    size_t n = (remaining > IME_SESSION_CAND_PAGE_SIZE) ? IME_SESSION_CAND_PAGE_SIZE : remaining;
+    size_t n = (remaining > page_size()) ? page_size() : remaining;
     s_ime.page_count = n;
     if (s_ime.selected < s_ime.page_start || s_ime.selected >= s_ime.page_start + n) {
         s_ime.selected = s_ime.page_start;
     }
+}
+
+void ime_session_set_page_size(size_t n)
+{
+    if (n == 0) {
+        n = 1;
+    }
+    if (n > IME_SESSION_CAND_PAGE_SIZE) {
+        n = IME_SESSION_CAND_PAGE_SIZE;
+    }
+    if (n == s_page_size) {
+        return;
+    }
+    s_page_size = n;
+    /* 窗口变小可能把当前高亮项挤出去，window_refresh() 会把它拉回页首 */
+    window_refresh();
 }
 
 static void refresh_candidates(void)
@@ -430,7 +458,7 @@ bool ime_session_page_next(void)
     if (!ime_session_has_next_page()) {
         return false;
     }
-    load_page(s_ime.page_start + IME_SESSION_CAND_PAGE_SIZE);
+    load_page(s_ime.page_start + page_size());
     return true;
 }
 
@@ -439,7 +467,8 @@ bool ime_session_page_prev(void)
     if (!ime_session_has_prev_page()) {
         return false;
     }
-    load_page(s_ime.page_start - IME_SESSION_CAND_PAGE_SIZE);
+    const size_t step = page_size();
+    load_page((s_ime.page_start > step) ? (s_ime.page_start - step) : 0);
     return true;
 }
 
@@ -450,7 +479,7 @@ size_t ime_session_page_start(void)
 
 size_t ime_session_page_size(void)
 {
-    return IME_SESSION_CAND_PAGE_SIZE;
+    return page_size();
 }
 
 bool ime_session_has_next_page(void)

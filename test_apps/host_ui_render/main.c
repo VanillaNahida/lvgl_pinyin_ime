@@ -115,6 +115,13 @@ static void type_text(lv_obj_t *ime, const char *text)
         }
         ime_session_push_letter(*p);
     }
+    /*
+     * Lay out before refreshing: the candidate bar's width is what decides how
+     * many candidates fit, and a widget that has never been laid out reports 0.
+     * (In an application the layout runs every frame, so a key press always sees
+     * a valid width - the test types a whole string in one go.)
+     */
+    lv_obj_update_layout(ime);
     ime_ui_commit_pending(ime_ctx_get(ime));
     ime_ui_refresh_all(ime_ctx_get(ime));
     lv_obj_update_layout(ime);
@@ -248,8 +255,19 @@ int main(int argc, char **argv)
     lv_textarea_set_one_line(ta, true);
     lv_textarea_set_placeholder_text(ta, "输入文字...");
 
+    /*
+     * Host the keyboard in a content-sized box, the way the applications do
+     * (app_momotalk 的 s_ime_box 就是这样) - the pinyin chip draws *above* the
+     * widget, so this proves the overflow setup reaches through the ancestors too.
+     */
+    lv_obj_t *box = lv_obj_create(scr);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_align(box, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
     printf("creating the IME ...\n");
-    lv_obj_t *ime = lv_pinyin_ime_create(scr);
+    lv_obj_t *ime = lv_pinyin_ime_create(box);
     printf("lv_pinyin_ime_create -> %p\n", (void *)ime);
     printf("fonts: big=%p small=%p (%s)\n", (void *)ime_font_big(), (void *)ime_font_small(),
            ime_font_big() != NULL ? "IME fonts" : "LV_FONT_DEFAULT");
@@ -258,7 +276,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    lv_obj_align(ime, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_pinyin_ime_attach(ime, ta);
 
     if (strcmp(mode, "k9") == 0) {
@@ -413,6 +430,76 @@ int main(int argc, char **argv)
         shift = find_key(ime, IME_KEY_SHIFT);
         check(shift != NULL && !lv_obj_has_state(shift, LV_STATE_CHECKED),
               "the shift key is no longer highlighted");
+    }
+
+    if (strcmp(action, "chip") == 0) {
+        /*
+         * The pinyin chip hangs above the candidate bar, outside the widget's own
+         * box. Three things have to hold:
+         *   - it shows up as soon as something is being composed,
+         *   - it takes no room at all (no reserved band, no height change),
+         *   - it really is drawn above the widget (i.e. the ancestors let it
+         *     overflow; without that setup LVGL clips it and it is invisible).
+         */
+        lv_pinyin_ime_ctx_t *ctx = ime_ctx_get(ime);
+        lv_obj_update_layout(ime);
+        const int h_before = lv_obj_get_height(ime);
+
+        ime_session_push_letter('n');
+        ime_ui_commit_pending(ctx);
+        ime_ui_refresh_all(ctx);
+        lv_obj_update_layout(ime);
+
+        const int h_after = lv_obj_get_height(ime);
+        check(!lv_obj_has_flag(ctx->chip, LV_OBJ_FLAG_HIDDEN), "the chip appears while typing");
+        check(h_after == h_before, "the chip reserves no space (height unchanged)");
+        check(lv_obj_get_y2(ctx->chip) <= lv_obj_get_y(ime),
+              "the chip is drawn above the widget");
+        check(lv_obj_has_flag(ctx->chip, LV_OBJ_FLAG_FLOATING),
+              "the chip is floating (skipped by layout and by content size)");
+        check(lv_obj_has_flag(ime, LV_OBJ_FLAG_OVERFLOW_VISIBLE),
+              "the widget allows its children to overflow");
+    }
+
+    if (strcmp(action, "fit") == 0) {
+        /*
+         * 长拼音会出"中华人民共和国"这种很宽的候选词。一屏放不下就该少放几个，
+         * 而不是把后面的候选顶出可视范围（用户报的"有字在显示范围外"）。
+         *
+         * lv_obj_get_x() 是**相对父对象**的（lv_obj_pos.c:536），所以这里拿候选
+         * 相对候选行的位置，跟行自身的 0..内容宽比。
+         */
+        lv_pinyin_ime_ctx_t *ctx = ime_ctx_get(ime);
+        const int row_w = lv_obj_get_content_width(ctx->cand_row);
+        const bool have_cands = (ime_session_candidate(0) != NULL);
+        size_t shown = 0;
+        int outside = 0;
+        for (size_t i = 0; i < IME_UI_CAND_MAX; i++) {
+            lv_obj_t *b = ctx->cand_btns[i];
+            if (b == NULL || lv_obj_has_flag(b, LV_OBJ_FLAG_HIDDEN)) {
+                continue;
+            }
+            shown++;
+            const int bx = lv_obj_get_x(b);
+            const int bx2 = bx + lv_obj_get_width(b);
+            if (bx < 0 || bx2 > row_w) {
+                outside++;
+                printf("  candidate %u at %d..%d is outside the row 0..%d\n",
+                       (unsigned)i, bx, bx2, row_w);
+            } else {
+                printf("  candidate %u: button %d..%d, label w=%d\n", (unsigned)i, bx, bx2,
+                       (int)lv_obj_get_width(lv_obj_get_child(b, 0)));
+            }
+        }
+        printf("  row content width %d, showing %u candidates, page size %u\n",
+               row_w, (unsigned)shown, (unsigned)ime_session_page_size());
+        if (have_cands) {
+            check(shown > 0, "at least one candidate is shown");
+            check(outside == 0, "no candidate sticks out of the candidate row");
+            check(ime_session_page_size() <= 8, "the page size stays within the maximum");
+        } else {
+            check(shown == 0, "no candidates while nothing is being composed");
+        }
     }
 
     if (strcmp(action, "press") == 0) {

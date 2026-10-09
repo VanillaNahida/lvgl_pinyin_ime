@@ -220,6 +220,11 @@ lv_obj_t *lv_pinyin_ime_create(lv_obj_t *parent)
 
     ctx->obj = lv_obj_create(parent);
     ime_style_apply_root(ctx->obj);
+    /*
+     * 拼音浮窗画在候选栏上方（内容区之外），先把它自己和祖先的"允许溢出"配好，
+     * 否则浮窗会被裁掉、看不见（见 ime_ui_chip_prepare）。
+     */
+    ime_ui_chip_prepare(ctx->obj);
     lv_obj_set_size(ctx->obj, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(ctx->obj, LV_FLEX_FLOW_COLUMN);
     lv_obj_remove_flag(ctx->obj, LV_OBJ_FLAG_SCROLLABLE);

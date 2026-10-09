@@ -103,6 +103,19 @@ bool ime_session_has_input(void);
 
 /* -------------------------------------------------------------- candidates */
 
+/**
+ * How many candidates fit on one screen, set by the UI.
+ *
+ * The UI measures the candidate texts (a phrase like 中华人民共和国 is six times
+ * as wide as a single character) and tells the session, so a page never holds
+ * more than fits and paging steps by the same amount. Clamped to
+ * [1, IME_SESSION_CAND_PAGE_SIZE]; the compile-time value stays the maximum.
+ */
+void ime_session_set_page_size(size_t n);
+
+/** Current page size (the value set above, or the compile-time default). */
+size_t ime_session_page_size(void);
+
 size_t ime_session_candidate_count(void);
 
 /** Candidate text is UTF-8 and NUL terminated; NULL when out of range. */

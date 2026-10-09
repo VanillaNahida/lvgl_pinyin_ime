@@ -17,8 +17,14 @@ void ime_style_init(void);
 /** Style a key button; @p special selects the darker modifier look. */
 void ime_style_apply_key(lv_obj_t *btn, bool special);
 
-/** Style a candidate button; @p selected highlights the active candidate. */
-void ime_style_apply_candidate(lv_obj_t *btn, bool selected);
+/**
+ * Style a candidate button; @p selected highlights the active candidate.
+ *
+ * @p grow adds flex_grow (the 9-key pinyin chips use it to fill their row).
+ * Candidates must pass false: their width is measured per text by the UI, and
+ * flex_grow would squash a long phrase down to the average item width.
+ */
+void ime_style_apply_candidate(lv_obj_t *btn, bool selected, bool grow);
 
 /** Style the floating pinyin chip. */
 void ime_style_apply_chip(lv_obj_t *label);

@@ -53,6 +53,7 @@ static lv_style_t s_key_active;
 static lv_style_t s_key_disabled;
 static lv_style_t s_label;
 static lv_style_t s_cand_btn;
+static lv_style_t s_cand_grow;
 static lv_style_t s_cand_selected;
 static lv_style_t s_chip;
 static lv_style_t s_bar;
@@ -132,16 +133,20 @@ void ime_style_init(void)
     lv_style_set_text_color(&s_cand_btn, IME_COLOR_TEXT);
     lv_style_set_pad_hor(&s_cand_btn, 4);
     lv_style_set_pad_ver(&s_cand_btn, 2);
+
     /*
-     * Every visible candidate shares the row width, so the bar is filled edge to
-     * edge instead of leaving the right half empty (the row width follows the
-     * keyboard, so this is what makes the candidates adapt to it). Setting it
-     * here rather than with lv_obj_set_flex_grow() at build time matters:
-     * ime_style_apply_candidate() starts with lv_obj_remove_style_all(), which
-     * would wipe a locally set grow on every refresh. Hidden candidates are
-     * skipped by the flex layout, so the count on screen never matters.
+     * 把一行的剩余宽度平分给这几个对象（九键的拼音 chip 用）。
+     *
+     * ⚠ **候选词不能用它**：候选宽度是 UI 按每个词的实际字宽量出来、再平分剩余
+     *   宽度定死的（cand.c 的 cand_measure()），而 flex_grow 的"基准宽度"取的是
+     *   子对象**当前**宽度 —— 刚换过文字的按钮基准还是旧值，于是 140 px 的长词
+     *   和 20 px 的单字被摊成一样宽，长词按钮装不下自己的文字，标签就溢到邻居上
+     *   （用户报的"候选字显示范围外"就是这个）。
+     *   放在样式里而不是 lv_obj_set_flex_grow()：ime_style_apply_candidate() 开头
+     *   的 lv_obj_remove_style_all() 会把本地属性一起清掉。
      */
-    lv_style_set_flex_grow(&s_cand_btn, 1);
+    init_common(&s_cand_grow);
+    lv_style_set_flex_grow(&s_cand_grow, 1);
 
     init_common(&s_cand_selected);
     lv_style_set_bg_color(&s_cand_selected, IME_COLOR_ACCENT);
@@ -187,11 +192,14 @@ void ime_style_apply_key(lv_obj_t *btn, bool special)
     lv_obj_set_style_text_align(btn, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 }
 
-void ime_style_apply_candidate(lv_obj_t *btn, bool selected)
+void ime_style_apply_candidate(lv_obj_t *btn, bool selected, bool grow)
 {
     ime_style_init();
     lv_obj_remove_style_all(btn);
     lv_obj_add_style(btn, &s_cand_btn, LV_PART_MAIN);
+    if (grow) {
+        lv_obj_add_style(btn, &s_cand_grow, LV_PART_MAIN);
+    }
     if (selected) {
         lv_obj_add_style(btn, &s_cand_selected, LV_PART_MAIN);
     }

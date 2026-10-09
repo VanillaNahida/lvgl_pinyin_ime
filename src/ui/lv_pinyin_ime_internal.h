@@ -198,6 +198,15 @@ void ime_ui_apply_sizes(lv_pinyin_ime_ctx_t *ctx);
 /** Create the candidate bar, the pinyin chip and the 9-key pinyin row. */
 void ime_ui_build_candidates(lv_pinyin_ime_ctx_t *ctx);
 
+/**
+ * 允许拼音浮窗画到控件外面。
+ *
+ * 浮窗贴在候选栏上沿之上 —— 那是控件内容区**之外**，而 LVGL 默认把子对象裁在父
+ * 对象盒子里。所以创建控件时要调一次：它会给控件本身和每一层祖先都加上
+ * "允许溢出 + 撑高扩展绘制区"（少一层就会被那一层裁掉）。
+ */
+void ime_ui_chip_prepare(lv_obj_t *root);
+
 /** Redraw the candidate list, the chip and the pager state. */
 void ime_ui_refresh_candidates(lv_pinyin_ime_ctx_t *ctx);
 
