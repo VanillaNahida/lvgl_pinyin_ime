@@ -1046,6 +1046,7 @@ int lv_pinyin_ime_voice_start(lv_pinyin_ime_voice_t *v)
     v->ws_closed_by_peer = false;
     v->consecutive_audio_errors = 0;
     v->silent_frames = 0;
+    v->peak_max = 0;
     unlock(v);
 
     set_state(v, LV_PINYIN_IME_VOICE_CONNECTING);
