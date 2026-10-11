@@ -58,12 +58,30 @@ lv_pinyin_ime_ctx_t *ime_ctx_get(lv_obj_t *obj)
     return (obj != NULL) ? lv_obj_get_user_data(obj) : NULL;
 }
 
+/* 点"键盘/输入框以外"的地方就收起键盘（实现在文件后半段，销毁回调里要用，先声明） */
+static void ime_dismiss_cb(lv_event_t *e);
+
 void ime_root_delete_cb(lv_event_t *e)
 {
     lv_pinyin_ime_ctx_t *ctx = lv_event_get_user_data(e);
-    if (ctx != NULL) {
-        lv_free(ctx);
+    if (ctx == NULL) {
+        return;
     }
+    /*
+     * ★ 必须在这里把"点空白收起"的回调摘掉：它挂在**屏幕 / 顶层 layer** 上，
+     *   那两个比键盘活得久 —— 不摘的话键盘销毁后它们还留着，一旦再被点到就会用
+     *   已释放的 ctx 去 lv_obj_get_user_data()（悬垂指针，真机会崩）。
+     *   本回调是 create() 里注册的，ctx 还活着，正好用它的两个字段定位。
+     */
+    if (ctx->dismiss_root != NULL && lv_obj_is_valid(ctx->dismiss_root)) {
+        lv_obj_remove_event_cb_with_user_data(ctx->dismiss_root, ime_dismiss_cb, ctx->obj);
+        ctx->dismiss_root = NULL;
+    }
+    if (ctx->dismiss_layer != NULL && lv_obj_is_valid(ctx->dismiss_layer)) {
+        lv_obj_remove_event_cb_with_user_data(ctx->dismiss_layer, ime_dismiss_cb, ctx->obj);
+        ctx->dismiss_layer = NULL;
+    }
+    lv_free(ctx);
 }
 
 /**
@@ -255,6 +273,70 @@ lv_obj_t *lv_pinyin_ime_create(lv_obj_t *parent)
     return ctx->obj;
 }
 
+/*
+ * "点键盘/输入框以外的地方 → 收起键盘"（2026-10 用户报：Wi-Fi 密码与歌单输入的
+ * 虚拟键盘在输入框失去激活时不会自己收起来）。
+ *
+ * 为什么不用 textarea 的 LV_EVENT_DEFOCUSED：LVGL 只在点到**另一个
+ * CLICK_FOCUSABLE 对象**时才给旧对象发 DEFOCUSED（见 lv_indev.c 的
+ * indev_click_focus），点普通行/遮罩根本不会触发 —— 那正是用户遇到的场景。
+ * 所以在屏幕（或顶层 layer，模态框挂那儿）这一层看"这一击落在谁身上"：
+ * 落在键盘上、或落在绑定的输入框上，都算"还在输入"。
+ *
+ * ⚠ 冲突保护：应用自己的点击回调可能顺手 show()（例如点搜索历史行会重跑搜索并
+ *   重新拉起键盘），而冒泡到这里的 dismiss 会立刻又把它收起来 ——
+ *   所以刚 show() 过的 100 ms 内不理会 dismiss（同本工程 MENU_GRACE_MS 的思路）。
+ */
+#define IME_DISMISS_GRACE_MS 100
+
+static bool ime_is_under(const lv_obj_t *obj, const lv_obj_t *maybe_ancestor)
+{
+    for (const lv_obj_t *p = obj; p != NULL; p = lv_obj_get_parent(p)) {
+        if (p == maybe_ancestor) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ime_dismiss_cb(lv_event_t *e)
+{
+    lv_obj_t *ime = (lv_obj_t *)lv_event_get_user_data(e);
+    lv_pinyin_ime_ctx_t *ctx = ime_ctx_get(ime);
+    if (ctx == NULL || lv_obj_has_flag(ime, LV_OBJ_FLAG_HIDDEN)) {
+        return;
+    }
+    if (lv_tick_elaps(ctx->shown_tick) < IME_DISMISS_GRACE_MS) {
+        return;
+    }
+    lv_obj_t *tgt = (lv_obj_t *)lv_event_get_target(e);
+    if (tgt == NULL) {
+        return;
+    }
+    if (ime_is_under(tgt, ime) || (ctx->ta != NULL && ime_is_under(tgt, ctx->ta))) {
+        return;                          /* 点在键盘上 / 点在输入框上：不算"离开" */
+    }
+    lv_pinyin_ime_hide(ime);
+}
+
+/* 把 dismiss 回调挂到 IME 所在的屏幕与顶层 layer（模态框可能挂在后者上） */
+static void ime_bind_dismiss(lv_pinyin_ime_ctx_t *ctx)
+{
+    if (ctx == NULL || ctx->obj == NULL) {
+        return;
+    }
+    lv_obj_t *scr = lv_obj_get_screen(ctx->obj);
+    if (scr != NULL && ctx->dismiss_root != scr) {
+        lv_obj_add_event_cb(scr, ime_dismiss_cb, LV_EVENT_CLICKED, ctx->obj);
+        ctx->dismiss_root = scr;
+    }
+    lv_obj_t *top = lv_layer_top();
+    if (top != NULL && top != scr && ctx->dismiss_layer != top) {
+        lv_obj_add_event_cb(top, ime_dismiss_cb, LV_EVENT_CLICKED, ctx->obj);
+        ctx->dismiss_layer = top;
+    }
+}
+
 void lv_pinyin_ime_attach(lv_obj_t *ime, lv_obj_t *ta)
 {
     lv_pinyin_ime_ctx_t *ctx = ime_ctx_get(ime);
@@ -278,6 +360,25 @@ void lv_pinyin_ime_attach(lv_obj_t *ime, lv_obj_t *ta)
         lv_obj_set_style_text_font(ta, ime_font_big(), LV_PART_MAIN);
         lv_obj_set_style_text_font(ta, ime_font_big(), LV_PART_TEXTAREA_PLACEHOLDER);
     }
+
+    /*
+     * 光标画成**竖线**（2026-10 用户报："选择输入框时光标是一个方框"）。
+     *
+     * LVGL 的 textarea 光标是 LV_PART_CURSOR：默认用背景色**填满**整个字符格 →
+     * 看起来就是一个实心方块。把它改成"背景透明 + 只留左边框 2px"，就是常见的
+     * 细竖线光标。颜色跟随主题的强调色（跟关键字色一致，深浅主题都不会看不见）。
+     */
+    if (ta != NULL) {
+        const lv_color_t cur = lv_obj_get_style_text_color(ta, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(ta, LV_OPA_TRANSP, LV_PART_CURSOR);
+        lv_obj_set_style_border_side(ta, LV_BORDER_SIDE_LEFT, LV_PART_CURSOR);
+        lv_obj_set_style_border_width(ta, 2, LV_PART_CURSOR);
+        lv_obj_set_style_border_color(ta, cur, LV_PART_CURSOR);
+        lv_obj_set_style_border_opa(ta, LV_OPA_COVER, LV_PART_CURSOR);
+        lv_obj_set_style_radius(ta, 0, LV_PART_CURSOR);
+    }
+
+    ime_bind_dismiss(ctx);
 }
 
 void lv_pinyin_ime_set_mode(lv_obj_t *ime, lv_pinyin_ime_mode_t mode)
@@ -345,6 +446,10 @@ void lv_pinyin_ime_reset(lv_obj_t *ime)
 
 void lv_pinyin_ime_show(lv_obj_t *ime)
 {
+    lv_pinyin_ime_ctx_t *ctx = ime_ctx_get(ime);
+    if (ctx != NULL) {
+        ctx->shown_tick = lv_tick_get();
+    }
     lv_obj_remove_flag(ime, LV_OBJ_FLAG_HIDDEN);
 }
 

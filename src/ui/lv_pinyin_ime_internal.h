@@ -138,6 +138,17 @@ typedef struct {
     lv_obj_t *obj;    /**< the IME root object */
     lv_obj_t *ta;     /**< bound text area, may be NULL */
 
+    /*
+     * "Click outside to dismiss" (2026-10): the root(s) we attached the dismiss
+     * callback to, plus when the IME was last shown. The timestamp guards a
+     * real conflict: if an application's own click handler re-shows the
+     * keyboard (e.g. tapping a search-history row re-runs the search), the
+     * bubbled dismiss callback would immediately hide it again.
+     */
+    lv_obj_t *dismiss_root;
+    lv_obj_t *dismiss_layer;
+    uint32_t  shown_tick;
+
     ime_mode_t mode;
     ime_lang_t lang;
     lv_pinyin_ime_panel_t panel;
