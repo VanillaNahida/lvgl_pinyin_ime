@@ -208,6 +208,27 @@ lv_obj_add_event_cb(ime, on_voice_result, lv_pinyin_ime_event_voice_result(), NU
 （当静音处理，不报错）；返回负数表示硬件错误，连续 5 次才中断本次识别（偶发抖动不
 该打断整段话）。
 
+### 5.1 讯飞只收 16 k / 8 k，重采样必须由调用方做
+
+接口**不支持**原始采样率：`data.format` 只接受 `audio/L16;rate=16000` 或 `rate=8000`，
+没有"按麦克风实际采样率上传"这种用法。所以板子上的 codec 跑 48 kHz（很常见）时，调用方
+必须先自己降到 16 k 单声道再交给组件。典型链路：
+
+```
+codec 48 kHz stereo ──┬─ 取一路声道（或两路平均）
+                      ├─ 抗混叠低通（截止 ~7.6 kHz）← 最容易漏的一步
+                      └─ 抽取到 16 kHz ─→ audio_read() 返回 16 k 单声道 PCM
+```
+
+两个实践要点：
+
+- **别只做抽取、不做滤波**。48 k → 16 k 是 3 倍抽取，直接每 3 个样本取 1 个会把
+  8 kHz 以上的能量**折叠**到可听频带里，识别率明显下降（听感上是"沙沙"的金属音）。
+  要么做低通，要么用带抗混叠的库（`esp_audio_codec` / `speex` 的重采样器）。
+- **重采样放在你的函数里，不要在 `audio_read()` 里临时开大数组**。这个坑和 §8.4 里
+  组件踩的是同一个：重采样器常常要几百字节到几 KB 的中间缓冲，放在任务栈上就会
+  Stack protection fault —— 而且崩在**你的**任务里，日志看着像语音组件的锅。
+
 ## 6. 出错时看到什么
 
 状态条上的文案与错误码一一对应：
@@ -255,6 +276,8 @@ gcc -std=c11 -Wall -Wextra -Werror -Isrc `
   `vad`、句子多候选 `nbest`、词级多候选 `wbest`、错误帧、数字写成字符串）
 - **动态修正段落表**：`apd` 追加、`rpl` 替换（含 `rg=[1,2]` 合并）、“重复同一帧应报告
   无变化”、`sn/rg` 越界要钳位
+- **流式性**：用官方 demo 带的 `iat_pcm_16k.pcm`（152 916 B）走完整帧序，断言
+  **每收一帧就能拿到当前文本**，并且收尾帧不会把最后一段重复一遍
 - **字形过滤**：emoji / 非法 UTF-8 要丢掉、缓冲不足要截断而不越界
 
 > 其中"`vad.bg` 与 `ws[].bg` 层级不能串"那条是有来历的：返回帧里两个层级都有 `bg`，
@@ -350,7 +373,84 @@ LVGL 线程                    组件任务                     应用网络任�
 文档说整个会话最长 60 s，所以组件在 **55 s** 主动发结束帧（`IME_VOICE_MAX_SESSION_MS`），
 留 5 s 给最后一块结果的往返。与其让用户撞上"识别突然失败"，不如先把结果拿到手。
 
-### 8.4 字形过滤
+### 8.4 任务栈：踩过三次，全是"以为够，其实差一个数量级"
+
+这部分是**真机崩过三次**之后补的，改动前请先读完。
+
+#### ⚠ 第一件必须先记住的事：`xTaskCreate` 的深度单位是**字节**，不是字
+
+ESP-IDF 的 FreeRTOS 端口里：
+
+```c
+/* FreeRTOS-Kernel/portable/riscv/include/freertos/portmacro.h */
+#define portSTACK_TYPE              uint8_t
+typedef portSTACK_TYPE              StackType_t;
+```
+
+RISC-V 与 Xtensa 两个端口都是 `uint8_t`。所以 `xTaskCreate(..., 1536, ...)` 给的是
+**1536 字节**，不是 6 KB —— 按"字"（4 字节）理解会差 4 倍，而编译器不会提醒你。
+
+验证方法：崩溃日志里任务的 `Stack bounds` 直接给出真实大小。曾经写下 1536、以为等于
+6 KB，日志里是 `0x2f04310c - 0x2f043700` = **1524 字节**，一眼就对上了。
+
+`uxTaskGetStackHighWaterMark()` 的单位是 `StackType_t` 个数，在这个端口上也就是字节数
+（代码里仍写 `hwm * sizeof(StackType_t)`，是为了在别的端口上也正确）。
+
+#### 三次崩溃的时间线
+
+| # | 栈 | 崩在哪 | 根因 |
+| --- | --- | --- | --- |
+| 1 | 4096 | `ime_voice_build_auth_url` | 该函数有 6 个局部数组，约 2.3 KB |
+| 2 | 8192 | `handle_reply` | `ime_voice_reply_t r;` —— **这个结构体单独 12 744 字节**（`segs[32] × 392 B`），栈开多大都不该放它 |
+| 3 | **1536** | `ime_voice_build_auth_url` 又崩 | 把 6144 当"字"改成 1536，实际只给了 1536 **字节**；同一个 2.3 KB 的函数立刻又爆 |
+
+第 3 次最值得记：**同一个函数崩了两次**。第一次以为"栈太小"（于是把栈调大），第二次才
+看清是"这个函数在栈上放了 2.3 KB 的东西"。所以正确的修法是**搬缓冲**，不是调栈。
+
+#### 现在的做法：所有大缓冲都在会话工作区（堆）
+
+`ime_voice_scratch_t`，随会话 `malloc` 一次、任务循环反复复用：
+
+| 内容 | 大小 | 曾经在哪 |
+| --- | --- | --- |
+| `ime_voice_reply_t reply` | 12 744 B | `handle_reply()` 的局部变量 |
+| `auth`（`ime_voice_auth_scratch_t`） | 2 336 B | `build_auth_url()` 的 6 个局部数组 |
+| 拼帧缓冲 `frame` | 3 200 B | `voice_task()` 的局部数组 |
+| PCM 帧 `pcm` | 1 280 B | 同上 |
+| 整句快照 `before_text` | 640 B | `transcript_apply()` 的局部数组 |
+| **合计** | **≈ 20 KB** | 全在堆上 |
+
+搬完之后的实测栈帧（`-fstack-usage`，`tools/check_stack_usage.ps1`）：
+
+| 路径 | 栈深 |
+| --- | --- |
+| 签名 `build_auth_url_now` 80 → `build_auth_url` **96** → `hmac_sha256` 368 → `sha256_block` 352 | ≈ **1008 B**（最坏） |
+| 收帧 `handle_reply` 112 → `parse_reply` 80 → `parse_result` 144 → `parse_seg` 96 | ≈ 560 B |
+
+`build_auth_url` 从 **2464 B → 96 B**，这就是"搬缓冲"的效果。任务栈定为
+`IME_VOICE_TASK_STACK = 8192`（字节），相对最坏链约 8 倍余量，用来吸收
+`ESP_LOG` 的 `snprintf`、IDF 初始化等不在我们 `.su` 统计里的调用。
+
+#### 下次再出这类问题的排查顺序
+
+```powershell
+# 1. 量栈帧（交叉编译器，几秒钟）
+powershell -ExecutionPolicy Bypass -File tools\check_stack_usage.ps1
+#    列出每个函数的帧大小并和任务栈对比，余量 < 1 KB 会报警
+
+# 2. 真机每次会话结束会打一行实测余量
+#    I (xxxxx) ime_voice: voice task stack free at exit: 7840 B (high-water mark)
+#    接近 0 → 又有大家伙混进栈里了，去查局部变量
+```
+
+#### 编译期护栏
+
+`ime_voice.c` 里有几条 `_Static_assert` 把这几件事钉住：
+
+- 工作区必须含 `reply` 与 `auth` 两块（谁挪回局部变量，结构体就会变小 → 断言失败）
+- `IME_VOICE_TASK_STACK >= 4096`（防止再有人按"字"把它写成一千多）
+
+### 8.5 字形过滤
 
 识别结果来自云端，字表外的字会画成缺字方框。所以文本进输入框之前要过一道筛子，
 判据是**当前字体到底有没有这个字形**（`lv_font_get_glyph_dsc()` + `is_placeholder`，

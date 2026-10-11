@@ -80,7 +80,6 @@ static const ime_key_t s_k26_r4[] = {
     KWT("?123", NULL, IME_KEY_PANEL, 20),
     KWT(LV_SYMBOL_KEYBOARD, NULL, IME_KEY_SWITCH_KB, 20),
     KWT("空格", NULL, IME_KEY_SPACE, 30),
-    KWT(LV_SYMBOL_AUDIO, NULL, IME_KEY_VOICE, 20),
     KWT("中", NULL, IME_KEY_LANG, 15),
     KWT(LV_SYMBOL_OK, NULL, IME_KEY_CONFIRM, 15),
 };
@@ -140,7 +139,6 @@ static const ime_key_t s_k9_r3[] = {
 static const ime_key_t s_k9_r4[] = {
     KWT("选拼音", NULL, IME_KEY_T9_PINYIN, 24),
     KWT(LV_SYMBOL_KEYBOARD, NULL, IME_KEY_SWITCH_KB, 24),
-    KWT(LV_SYMBOL_AUDIO, NULL, IME_KEY_VOICE, 24),
     KWT("空格", NULL, IME_KEY_SPACE, 48),
 };
 #else
@@ -261,6 +259,11 @@ static const ime_key_t s_p3_r5[] = {
 
 /* ------------------------------------------------------------------ tables */
 
+/* 语音页中央圆形键的直径（像素）*/
+#ifndef IME_UI_VOICE_D
+#define IME_UI_VOICE_D 72
+#endif
+
 #define ROW(keys) {keys, sizeof(keys) / sizeof(keys[0])}
 
 #define ROWS(rows_name, kb_name, ...)                                 \
@@ -276,6 +279,31 @@ ROWS(s_p1_alt_rows, s_p1_alt_kb, ROW(s_p1a_r1), ROW(s_p1a_r2), ROW(s_p1_r3), ROW
 ROWS(s_p2_rows, s_p2_kb, ROW(s_p2_r1), ROW(s_p2_r2), ROW(s_p2_r3), ROW(s_p2_r4));
 ROWS(s_p3_rows, s_p3_kb, ROW(s_p3_r1), ROW(s_p3_r2), ROW(s_p3_r3), ROW(s_p3_r4), ROW(s_p3_r5));
 
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+/*
+ * 语音页（P4）：整页就一个大麦克风键 + 返回。
+ *
+ * 为什么改成"一整页"：语音**不再占用主键盘上的一个键**（用户要求）—— 键盘上的
+ * 键位本来就紧张，而且语音是"另一种输入方式"，和 26/9 键一样应该是一整页。
+ * 入口是 ⌨ 键（见 lv_pinyin_ime.c 的 IME_KEY_SWITCH_KB：26键 → 9键 → 语音页 → 26键）。
+ *
+ * 键面：action == IME_KEY_VOICE 时 build_key() 用 mic.png 位图绘制（label 字段忽略），
+ * 所以这里第一个字段留空串；按下/松手语义复用语音键那套（TOGGLE 点一下开始/再点结束，
+ * PTT 按住说话松手结束，长按=我说完了）。
+ */
+static const ime_key_t s_voice_r1[] = {
+    /* 左：返回主键盘（走现成的面板切换：text "main"）。 */
+    KWT("返回", "main", IME_KEY_PANEL, 34),
+    /*
+     * 中：麦克风。这一格**不靠 flex 排版** —— build_key() 里给它加了 FLOATING
+     * 并用 lv_obj_align(LV_ALIGN_CENTER) 定位，所以它是**屏幕正中的圆形**键，
+     * 而不是被拉伸的横条（用户要求："中间显示圆形语音键"）。
+     * 键面由 mic_icon（mic.png 位图）绘制，放大约 2 倍填满圆。
+     */
+    KWT("", NULL, IME_KEY_VOICE, 33),
+};
+ROWS(s_voice_rows, s_voice_kb, ROW(s_voice_r1));
+#endif
 static const ime_keyboard_t *const s_main_kb[IME_MODE_LAST][IME_LANG_LAST] = {
     {&s_k26_cn_kb, &s_k26_en_kb},
     {&s_k9_kb, &s_k9_kb},
@@ -286,6 +314,9 @@ static const ime_keyboard_t *const s_panel_kb[LV_PINYIN_IME_PANEL_LAST] = {
     &s_p1_kb,
     &s_p2_kb,
     &s_p3_kb,
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+    &s_voice_kb, /* P4: 语音页 */
+#endif
 };
 
 const ime_keyboard_t *ime_ui_active_keyboard(const lv_pinyin_ime_ctx_t *ctx)
@@ -299,7 +330,7 @@ const ime_keyboard_t *ime_ui_active_keyboard(const lv_pinyin_ime_ctx_t *ctx)
         return &s_p1_alt_kb;
     }
     if (ctx->panel < LV_PINYIN_IME_PANEL_LAST) {
-        return s_panel_kb[ctx->panel];
+        return s_panel_kb[ctx->panel] ? s_panel_kb[ctx->panel] : &s_k26_cn_kb;
     }
     return &s_k26_cn_kb;
 }
@@ -566,9 +597,163 @@ static int key_grow(const ime_key_t *key)
     return (key->width_u > 0) ? key->width_u : 10;
 }
 
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+/* 语音键的按下/松手/长按 —— 与主键盘上那个语音键走同一套组件 API。 */
+/*
+ * ⚠⚠ user_data 挂的是 **ctx**（不是 ime 对象）。组件的语音 API 要的是**键盘根对象**，
+ *    所以必须走 ctx->obj —— 直接把 user_data 强转成 lv_obj_t* 传进去，等于把 ctx
+ *    当对象用：组件在它上面找不到语音会话，表现就是**点了完全没反应**
+ *    （2026-10 真机踩过，这版修掉）。
+ */
+static void voice_page_mic_pressed(lv_event_t *e)
+{
+    lv_pinyin_ime_ctx_t *ctx = (lv_pinyin_ime_ctx_t *)lv_event_get_user_data(e);
+    if (ctx != NULL) {
+        lv_pinyin_ime_voice_key_pressed(ctx->obj);
+    }
+}
+static void voice_page_mic_released(lv_event_t *e)
+{
+    lv_pinyin_ime_ctx_t *ctx = (lv_pinyin_ime_ctx_t *)lv_event_get_user_data(e);
+    if (ctx != NULL) {
+        lv_pinyin_ime_voice_key_released(ctx->obj);
+    }
+}
+static void voice_page_mic_long(lv_event_t *e)
+{
+    voice_page_mic_released(e);
+}
+
+/* 底部左键：回 26 键主键盘 */
+static void voice_page_back_kb(lv_event_t *e)
+{
+    lv_pinyin_ime_ctx_t *ctx = (lv_pinyin_ime_ctx_t *)lv_event_get_user_data(e);
+    ctx->panel = LV_PINYIN_IME_PANEL_MAIN;
+    ctx->panel_alt = false;
+    ctx->mode = IME_MODE_K26;
+    ime_session_set_mode(ctx->mode);
+    ime_ui_rebuild_keyboard(ctx);
+}
+
+/* 底部右键：结束/取消本次识别并回主键盘 */
+static void voice_page_back_done(lv_event_t *e)
+{
+    lv_pinyin_ime_ctx_t *ctx = (lv_pinyin_ime_ctx_t *)lv_event_get_user_data(e);
+    lv_pinyin_ime_voice_key_cancelled(ctx->obj);   /* 会话没在跑时是空操作 */
+    ctx->panel = LV_PINYIN_IME_PANEL_MAIN;
+    ctx->panel_alt = false;
+    ime_ui_rebuild_keyboard(ctx);
+}
+
+/*
+ * 语音页的版式（用户要求）：
+ *
+ *     ┌────────────────────────────┐
+ *     │      聆听中 / 识别中 / 原因    │  ← 状态文字（voice_page_status）
+ *     │            ◯ 🎤             │  ← 正中圆形麦克风（FLOATING 都不要，见下）
+ *     │      ⌨            返回        │  ← 底部一行
+ *     └────────────────────────────┘
+ *
+ * ⚠ 为什么这里**不复用 ime_ui_apply_keyboard() 的键表渲染**：那一套把每个键放进
+ *   flex 行、宽度由权重决定，圆形按钮会被拉成横条（上一版就是这么坏的），而且
+ *   FLOATING + align 的 hack 会让按钮浮到键盘上遮住按键。这里全部自己搭、用百分比
+ *   与固定尺寸，位置确定。
+ */
+static void voice_page_build(lv_pinyin_ime_ctx_t *ctx)
+{
+    /* 状态文字 */
+    lv_obj_t *st = lv_label_create(ctx->kb_rows);
+    ime_style_apply_font(st, ime_font_small());
+    lv_obj_set_width(st, LV_PCT(100));
+    lv_obj_set_height(st, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_align(st, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_label_set_text(st, "语音输入");
+    ctx->voice_page_status = st;
+
+    /* 正中圆形麦克风：用一个撑满剩余高度的容器 + 居中，位置由布局决定而不是绝对坐标 */
+    lv_obj_t *mid = lv_obj_create(ctx->kb_rows);
+    lv_obj_remove_style_all(mid);
+    lv_obj_set_width(mid, LV_PCT(100));
+    /*
+     * ⚠ 这里**必须给确定高度**，不能用 flex_grow：父容器 ctx->kb_rows 是
+     *   LV_SIZE_CONTENT（高度由内容决定），在它里面 grow 没有任何空间可分 ——
+     *   实测结果就是容器高度算成 0、居中的圆形按钮整颗消失（2026-10 真机）。
+     *   高度取"圆直径"，上下不再加 padding，整页高度 = 状态行 + 圆 + 底部行。
+     */
+    /* 父容器（kb_rows）在语音页被撑成 100%，所以这里 grow 是有效的；min_height 兜底，
+     * 万一父高度算不出来也不会塌成 0（上一版就是塌成 0 → 圆消失）。 */
+    lv_obj_set_flex_grow(mid, 1);
+    lv_obj_set_style_min_height(mid, IME_UI_VOICE_D, LV_PART_MAIN);
+    lv_obj_remove_flag(mid, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *mic = lv_button_create(mid);
+    ime_style_apply_key(mic, false);
+    lv_obj_set_size(mic, IME_UI_VOICE_D, IME_UI_VOICE_D);
+    lv_obj_set_style_radius(mic, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_center(mic);
+    lv_obj_t *icon = lv_image_create(mic);
+    lv_image_set_src(icon, &mic_icon);
+    lv_image_set_scale(icon, 512);            /* 24px 位图放大 2 倍 */
+    lv_obj_center(icon);
+    lv_obj_add_event_cb(mic, voice_page_mic_pressed, LV_EVENT_PRESSED, ctx);
+    lv_obj_add_event_cb(mic, voice_page_mic_released, LV_EVENT_RELEASED, ctx);
+    lv_obj_add_event_cb(mic, voice_page_mic_long, LV_EVENT_LONG_PRESSED, ctx);
+    ctx->voice_page_mic = mic;
+
+    /* 底部一行：左 ⌨、右 返回 */
+    lv_obj_t *row = lv_obj_create(ctx->kb_rows);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *kb_btn = lv_button_create(row);
+    ime_style_apply_key(kb_btn, true);
+    lv_obj_set_size(kb_btn, IME_UI_VOICE_D * 2, IME_UI_VOICE_D / 2);
+    lv_obj_t *kb_lab = lv_label_create(kb_btn);
+    ime_style_apply_font(kb_lab, LV_FONT_DEFAULT);
+    lv_label_set_text(kb_lab, LV_SYMBOL_KEYBOARD);
+    lv_obj_center(kb_lab);
+    lv_obj_add_event_cb(kb_btn, voice_page_back_kb, LV_EVENT_CLICKED, ctx);
+
+    lv_obj_t *back_btn = lv_button_create(row);
+    ime_style_apply_key(back_btn, false);
+    lv_obj_set_size(back_btn, IME_UI_VOICE_D * 2, IME_UI_VOICE_D / 2);
+    lv_obj_t *back_lab = lv_label_create(back_btn);
+    ime_style_apply_font(back_lab, ime_font_small());
+    lv_label_set_text(back_lab, "返回");
+    lv_obj_center(back_lab);
+    lv_obj_add_event_cb(back_btn, voice_page_back_done, LV_EVENT_CLICKED, ctx);
+}
+#endif
+
 void ime_ui_apply_keyboard(lv_pinyin_ime_ctx_t *ctx, const ime_keyboard_t *kb)
 {
     lv_obj_clean(ctx->kb_rows);
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+    if (ctx->panel == LV_PINYIN_IME_PANEL_VOICE) {
+        /*
+         * 语音页：自己搭；候选栏让位（状态由上面那行文字承担）。
+         *
+         * ★ kb_rows 平时是 LV_SIZE_CONTENT（高度=各行之和），语音页内容少（约 135px），
+         *   而键盘区是固定高度 —— 差出来的那截就成了输入框下面那段**大白**（用户报）。
+         *   所以语音页把 kb_rows 撑满，让中间的圆形键去吃掉多余空间（它里面有 flex_grow）。
+         */
+        lv_obj_set_height(ctx->kb_rows, LV_PCT(100));
+        if (ctx->cand_bar != NULL) {
+            lv_obj_add_flag(ctx->cand_bar, LV_OBJ_FLAG_HIDDEN);
+        }
+        voice_page_build(ctx);
+        return;
+    }
+    lv_obj_set_height(ctx->kb_rows, LV_SIZE_CONTENT);   /* 其它页恢复原样 */
+    if (ctx->cand_bar != NULL) {
+        lv_obj_remove_flag(ctx->cand_bar, LV_OBJ_FLAG_HIDDEN);
+    }
+#endif
 
     for (size_t r = 0; r < kb->row_count; r++) {
         const ime_row_t *row = &kb->rows[r];
@@ -615,6 +800,17 @@ void ime_ui_apply_keyboard(lv_pinyin_ime_ctx_t *ctx, const ime_keyboard_t *kb)
             if (key->action == IME_KEY_VOICE) {
                 lv_obj_t *icon = lv_image_create(btn);
                 lv_image_set_src(icon, &mic_icon);
+                /* 语音页那颗键：做成屏幕正中的大圆形（用户要求）。
+                 * FLOATING = 脱离父容器 flex 布局，再由 lv_obj_align 居中；
+                 * 不这么做的话它会被 flex 拉伸成一条横键（原先是 70% 宽的长条）。 */
+                lv_obj_add_flag(btn, LV_OBJ_FLAG_FLOATING);
+                lv_obj_set_size(btn, IME_UI_VOICE_D, IME_UI_VOICE_D);
+                lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+                /* ⚠ 居中的参照物必须是**键盘根对象**（ctx->obj），不能是 btn 的父对象
+                 * （那一行只有 40 多 px 高，84 px 的圆会溢出被裁）。 */
+                lv_obj_align_to(btn, ctx->obj, LV_ALIGN_CENTER, 0, 0);
+                /* 位图 24x24 放进 84px 的圆里偏小：放大 2 倍（LVGL 的缩放单位是 1/256） */
+                lv_image_set_scale(icon, 512);
                 lv_obj_center(icon);
             } else {
                 lv_obj_t *label = lv_label_create(btn);

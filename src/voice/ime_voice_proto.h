@@ -105,6 +105,43 @@ bool ime_voice_params_valid(const ime_voice_params_t *p);
 bool ime_voice_rfc1123(int64_t utc_seconds, char *out, size_t out_size);
 
 /**
+ * 拼鉴权 URL 用的临时缓冲。
+ *
+ * ★ 为什么要有这个结构体、而且必须由调用方提供：
+ *
+ *   `ime_voice_build_auth_url()` 需要 6 段中间字符串（host / signature_origin /
+ *   authorization_origin / base64 结果 / URL 编码结果…），加起来约 2.3 KB。早期版本
+ *   把它们写成函数里的局部数组，结果在真机上**一进函数就栈溢出**：
+ *
+ *     Guru Meditation Error: Core 0 panic'ed (Stack protection fault)
+ *     Detected in task "ime_voice" at ime_voice_build_auth_url
+ *     Stack bounds: 0x2f04310c - 0x2f043700   ← 只有 1524 字节
+ *     Stack pointer: 0x2f042df0               ← 已越过下边界 796 字节
+ *
+ *   那个任务的栈当时是 1536 **字节**（注意：ESP-IDF 里 StackType_t 就是 uint8_t，
+ *   xTaskCreate 的深度单位是字节，不是字！），而一个函数就要 2.3 KB —— 无解。
+ *
+ *   所以这些缓冲改成调用方提供。组件内部用会话的工作区（堆），主机端测试用静态变量，
+ *   两边都不占任务栈。
+ */
+typedef struct {
+    /** host 部分（从 endpoint 里切出来）。 */
+    char host[128];
+    /** 签名原文："host: ..\ndate: ..\nGET .. HTTP/1.1" */
+    char origin[320];
+    /** HMAC-SHA256 的 base64 结果（44 字符 + NUL）。 */
+    char signature[64];
+    /** authorization 原文。 */
+    char auth_origin[320];
+    /** authorization 的 base64。 */
+    char authorization[512];
+    /** URL 编码后的 authorization / date / host。 */
+    char enc_auth[768];
+    char enc_date[64];
+    char enc_host[192];
+} ime_voice_auth_scratch_t;
+
+/**
  * 拼出带鉴权参数的完整 wss URL。
  *
  * 复刻文档 §接口鉴权：
@@ -116,16 +153,18 @@ bool ime_voice_rfc1123(int64_t utc_seconds, char *out, size_t out_size);
  *
  * @param p        会话参数（用 endpoint / apikey / apisecret）
  * @param date     RFC1123 时间串
+ * @param scratch  中间缓冲。**必须由调用方提供**，不要放栈上 —— 见该结构体的说明。
  * @param out      输出缓冲
- * @param out_size 缓冲大小；建议 >= 512
+ * @param out_size 缓冲大小；建议 >= 1024
  * @return 成功与否（缓冲不够、端点格式不对都会失败）
  */
-bool ime_voice_build_auth_url(const ime_voice_params_t *p, const char *date, char *out,
-                              size_t out_size);
+bool ime_voice_build_auth_url(const ime_voice_params_t *p, const char *date,
+                              ime_voice_auth_scratch_t *scratch, char *out, size_t out_size);
 
 /** 同上，但时间取当前系统时间。需调用方先 SNTP 对时。 */
 bool ime_voice_build_auth_url_now(const ime_voice_params_t *p, int64_t now_utc_seconds,
-                                  char *out, size_t out_size);
+                                  ime_voice_auth_scratch_t *scratch, char *out,
+                                  size_t out_size);
 
 /* ------------------------------------------------------------------- 请求帧 */
 
@@ -266,11 +305,15 @@ void ime_voice_transcript_reset(ime_voice_transcript_t *t);
 /**
  * 把一帧结果并进段落表。
  *
- * @param t     段落表
- * @param r     解析后的返回帧
+ * @param t               段落表
+ * @param r               解析后的返回帧
+ * @param before_scratch  调用方给的临时缓冲，至少 IME_VOICE_TRANSCRIPT_MAX 字节。
+ *                        用来存"改动前的整句"以便比较。**故意不做成局部数组**：
+ *                        它是 640 B，而调用方是只有几 KB 栈的任务，能省则省。
  * @return 整句文本有没有变化（UI 据此决定要不要重画）
  */
-bool ime_voice_transcript_apply(ime_voice_transcript_t *t, const ime_voice_reply_t *r);
+bool ime_voice_transcript_apply(ime_voice_transcript_t *t, const ime_voice_reply_t *r,
+                                char *before_scratch);
 
 /**
  * 取出当前整句（各段按顺序拼接）。没有内容时 out 写成空串。

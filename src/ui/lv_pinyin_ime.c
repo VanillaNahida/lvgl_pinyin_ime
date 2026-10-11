@@ -866,6 +866,34 @@ void ime_ui_handle_key(lv_pinyin_ime_ctx_t *ctx, const ime_key_t *key)
         break;
 
     case IME_KEY_SWITCH_KB:
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+        /*
+         * ★ 2026-10（用户要求）：⌨ 键在**三页**之间循环 —— 26 键 → 9 键 → 语音页 → 26 键。
+         *
+         * 语音不再占用主键盘上的一个键（原来是 LV_SYMBOL_AUDIO 那个，已从键表里删掉），
+         * 而是和"切 26/9 键"完全同一套机制：切成一整页，整页就一个大麦克风键 + 返回
+         * （键表见 kb.c 的 s_voice_r1 / s_voice_kb，面板是 LV_PINYIN_IME_PANEL_VOICE）。
+         *
+         * 判断条件只用编译开关：开了语音，键盘建出来时就一定有会话（create() 里那句
+         * ime_ui_voice_attach()），所以不需要再问"接没接上"。
+         */
+        if (ctx->panel == LV_PINYIN_IME_PANEL_VOICE) {
+            /* 在语音页按 ⌨ = 回到 26 键 */
+            ctx->panel = LV_PINYIN_IME_PANEL_MAIN;
+            ctx->panel_alt = false;
+            ctx->mode = IME_MODE_K26;
+            ime_session_set_mode(ctx->mode);
+            ime_ui_rebuild_keyboard(ctx);
+            break;
+        }
+        if (ctx->mode == IME_MODE_K9) {
+            /* 26 → 9 → 语音页：第三站是语音 */
+            ctx->panel = LV_PINYIN_IME_PANEL_VOICE;
+            ctx->panel_alt = false;
+            ime_ui_rebuild_keyboard(ctx);
+            break;
+        }
+#endif
         ctx->mode = (ctx->mode == IME_MODE_K26) ? IME_MODE_K9 : IME_MODE_K26;
         ime_session_set_mode(ctx->mode);
         ctx->panel = LV_PINYIN_IME_PANEL_MAIN;

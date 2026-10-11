@@ -52,6 +52,7 @@ typedef enum {
      */
     LV_PINYIN_IME_PANEL_NUM,
     LV_PINYIN_IME_PANEL_ALL_SYM,  /**< P3: all symbols */
+    LV_PINYIN_IME_PANEL_VOICE,   /**< P4: voice input page */
     LV_PINYIN_IME_PANEL_LAST,
 } lv_pinyin_ime_panel_t;
 

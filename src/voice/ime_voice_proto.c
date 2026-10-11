@@ -125,10 +125,10 @@ bool ime_voice_rfc1123(int64_t utc_seconds, char *out, size_t out_size)
     return (n > 0 && (size_t)n < out_size);
 }
 
-bool ime_voice_build_auth_url(const ime_voice_params_t *p, const char *date, char *out,
-                              size_t out_size)
+bool ime_voice_build_auth_url(const ime_voice_params_t *p, const char *date,
+                              ime_voice_auth_scratch_t *s, char *out, size_t out_size)
 {
-    if (p == NULL || date == NULL || out == NULL || out_size == 0) {
+    if (p == NULL || date == NULL || s == NULL || out == NULL || out_size == 0) {
         return false;
     }
     out[0] = '\0';
@@ -144,71 +144,64 @@ bool ime_voice_build_auth_url(const ime_voice_params_t *p, const char *date, cha
         return false;
     }
     const size_t host_len = (size_t)(path - host);
-    if (host_len == 0 || host_len >= 128u) {
+    if (host_len == 0 || host_len >= sizeof(s->host)) {
         return false;
     }
-    char host_str[128];
-    memcpy(host_str, host, host_len);
-    host_str[host_len] = '\0';
+    memcpy(s->host, host, host_len);
+    s->host[host_len] = '\0';
 
     /* signature_origin = "host: $host\ndate: $date\nGET $path HTTP/1.1" */
-    char origin[320];
-    const int olen = snprintf(origin, sizeof(origin), "host: %s\ndate: %s\nGET %s HTTP/1.1",
-                              host_str, date, path);
-    if (olen <= 0 || (size_t)olen >= sizeof(origin)) {
+    const int olen = snprintf(s->origin, sizeof(s->origin),
+                              "host: %s\ndate: %s\nGET %s HTTP/1.1", s->host, date, path);
+    if (olen <= 0 || (size_t)olen >= sizeof(s->origin)) {
         return false;
     }
 
     uint8_t mac[32];
     ime_voice_hmac_sha256((const uint8_t *)p->apisecret, strlen(p->apisecret),
-                          (const uint8_t *)origin, (size_t)olen, mac);
+                          (const uint8_t *)s->origin, (size_t)olen, mac);
 
-    char signature[64];
-    if (ime_voice_b64_encode(mac, sizeof(mac), signature, sizeof(signature)) == 0) {
+    if (ime_voice_b64_encode(mac, sizeof(mac), s->signature, sizeof(s->signature)) == 0) {
         return false;
     }
 
     /* authorization_origin：注意格式里的空格与引号是协议的一部分，一个都不能少
      * （文档 §authorization参数生成规则 第 6 步）。 */
-    char auth_origin[320];
-    const int alen = snprintf(auth_origin, sizeof(auth_origin),
+    const int alen = snprintf(s->auth_origin, sizeof(s->auth_origin),
                               "api_key=\"%s\", algorithm=\"hmac-sha256\", "
                               "headers=\"host date request-line\", signature=\"%s\"",
-                              p->apikey, signature);
-    if (alen <= 0 || (size_t)alen >= sizeof(auth_origin)) {
+                              p->apikey, s->signature);
+    if (alen <= 0 || (size_t)alen >= sizeof(s->auth_origin)) {
         return false;
     }
 
-    char authorization[512];
-    if (ime_voice_b64_encode((const uint8_t *)auth_origin, (size_t)alen, authorization,
-                             sizeof(authorization)) == 0) {
+    if (ime_voice_b64_encode((const uint8_t *)s->auth_origin, (size_t)alen, s->authorization,
+                             sizeof(s->authorization)) == 0) {
         return false;
     }
 
     /* date 与 authorization 都要 URL 编码后再拼（文档示例里 date 的逗号与空格就是
      * %2C / %20）。 */
-    char enc_auth[768];
-    char enc_date[64];
-    char enc_host[192];
-    if (ime_voice_url_encode(authorization, enc_auth, sizeof(enc_auth)) == 0 ||
-        ime_voice_url_encode(date, enc_date, sizeof(enc_date)) == 0 ||
-        ime_voice_url_encode(host_str, enc_host, sizeof(enc_host)) == 0) {
+    if (ime_voice_url_encode(s->authorization, s->enc_auth, sizeof(s->enc_auth)) == 0 ||
+        ime_voice_url_encode(date, s->enc_date, sizeof(s->enc_date)) == 0 ||
+        ime_voice_url_encode(s->host, s->enc_host, sizeof(s->enc_host)) == 0) {
         return false;
     }
 
     const int n = snprintf(out, out_size, "%s?authorization=%s&date=%s&host=%s", p->endpoint,
-                           enc_auth, enc_date, enc_host);
+                           s->enc_auth, s->enc_date, s->enc_host);
     return (n > 0 && (size_t)n < out_size);
 }
 
 bool ime_voice_build_auth_url_now(const ime_voice_params_t *p, int64_t now_utc_seconds,
-                                  char *out, size_t out_size)
+                                  ime_voice_auth_scratch_t *scratch, char *out,
+                                  size_t out_size)
 {
     char date[40];
     if (!ime_voice_rfc1123(now_utc_seconds, date, sizeof(date))) {
         return false;
     }
-    return ime_voice_build_auth_url(p, date, out, out_size);
+    return ime_voice_build_auth_url(p, date, scratch, out, out_size);
 }
 
 /* ------------------------------------------------------------------- 请求帧 */
@@ -980,9 +973,10 @@ void ime_voice_transcript_reset(ime_voice_transcript_t *t)
     memset(t, 0, sizeof(*t));
 }
 
-bool ime_voice_transcript_apply(ime_voice_transcript_t *t, const ime_voice_reply_t *r)
+bool ime_voice_transcript_apply(ime_voice_transcript_t *t, const ime_voice_reply_t *r,
+                                char *before_scratch)
 {
-    if (t == NULL || r == NULL) {
+    if (t == NULL || r == NULL || before_scratch == NULL) {
         return false;
     }
 
@@ -1003,17 +997,46 @@ bool ime_voice_transcript_apply(ime_voice_transcript_t *t, const ime_voice_reply
     ime_voice_reply_flat_text(r, text, sizeof(text));
 
     /*
-     * ★ 先记住改动前的样子，再落盘，最后比较。
+     * ★ 先记住改动前的整句，再落盘，最后比较。
+     *
      *   原来直接和 t->parts[] 比"要不要改"，但 rpl 分支一定会清空被替换的段落，
      *   于是"清空"这一步永远被算成"变了" —— 重复喂同一帧也会报变化，UI 每帧都
-     *   白重画一次（测试里的用例就是这个）。
+     *   白重画一次。
+     *
+     * ★ 快照由调用方给缓冲（before_scratch，至少 IME_VOICE_TRANSCRIPT_MAX 字节），
+     *   不在这里开局部数组：这份快照 640 B，而调用方是 4 KB 栈的任务，能省则省。
      */
-    char before[IME_VOICE_TRANSCRIPT_MAX];
-    const size_t before_len = ime_voice_transcript_text(t, before, sizeof(before));
+    ime_voice_transcript_text(t, before_scratch, IME_VOICE_TRANSCRIPT_MAX);
+    const size_t before_len = strlen(before_scratch);
 
-    if (r->has_pgs && strcmp(r->pgs, "rpl") == 0 && r->has_rg) {
-        int first = r->rg_first;
-        int last = r->rg_last;
+    /*
+     * 按 pgs 的值分派。pgs 是服务端对"这一片是什么"的声明：
+     *
+     *   1. pgs == "apd"   追加：这是**新的一段**，写到段号 sn 上。
+     *   2. pgs == "rpl"   替换：回头改写第 rg[0]..rg[1] 段（文档："替换前面的部分
+     *                     结果，替换范围为 rg 字段"）。即使 rg 缺失/损坏也走替换
+     *                     最后一段，绝不能当追加 —— 那会把被修正掉的旧文本留在屏上。
+     *   3. 没有 pgs       见下面那段长注释。
+     */
+    const bool pgs_is_append = r->has_pgs && (strcmp(r->pgs, "apd") == 0);
+    const bool is_final = (r->status == 2) || r->ls;
+
+    if (pgs_is_append) {
+        snprintf(t->parts[sn - 1], sizeof(t->parts[0]), "%s", text);
+        if (t->count < sn) {
+            t->count = sn;
+        }
+    } else if (r->has_pgs) {
+        /* rpl（或任何非 apd 的取值）：替换。rg 缺失时退化成"替换最后一段"。 */
+        int first;
+        int last;
+        if (r->has_rg) {
+            first = r->rg_first;
+            last = r->rg_last;
+        } else {
+            first = (t->count > 0) ? t->count : 1;
+            last = first;
+        }
         if (first < 1) {
             first = 1;
         }
@@ -1032,17 +1055,67 @@ bool ime_voice_transcript_apply(ime_voice_transcript_t *t, const ime_voice_reply
         if (t->count < last) {
             t->count = last;
         }
+    } else if (is_final) {
+        /*
+         * ★ 末帧（status=2 / ls=true）且**没有 pgs**：忽略它的内容。
+         *
+         * 这是被测试逼出来的一条规则（test_apps/host_voice_test 的 test_streaming）。
+         * 服务端的收尾帧不带 pgs，而且它**重发最后一段**：
+         *
+         *     sn=1 apd "今天"        → 今天
+         *     sn=2 apd "天气"        → 今天天气
+         *     sn=2 rpl [1,1] "明天"  → 明天天气
+         *     status=2, ls=true, sn=2, 无 pgs, ws=[{w:"明天"}]   ← 收尾帧
+         *
+         *   早期版本把这帧按 sn 当段号写（sn=2 → 写第 2 段），第 2 段从"天气"变成
+         *   "明天"，整句成了 **"明天明天"** —— 收尾帧重发的内容被当成了新的一段。
+         *   真机表现：说完一句之后，屏上最后一小段文字重复一遍。
+         *
+         * 为什么"忽略"比"再写一次"安全：
+         *   - 内容与最后一段相同（上面这种）→ 写不写都一样，忽略则永远不会写出重复；
+         *   - 内容不同 → 说明它带的是新东西，但既然没有 pgs，服务端并没有声明它是
+         *     新的一段；强行落盘就可能把整句搞乱。取"宁可少写也不要写错"。
+         *
+         * 注意：这只影响收尾帧。前面每一片都带 pgs（apd/rpl），文本在收尾之前
+         * 就已经完整地显示出来了 —— 所以忽略收尾帧不会丢字，用户看到的仍是逐字
+         * 实时刷新的效果。
+         */
+        (void)0;
     } else {
-        /* apd（或没开 wpgs）：写到自己的段号上。 */
+        /*
+         * 既没有 pgs、也不是末帧：按段号写。
+         *
+         * 这是**没开 wpgs** 的情况：文档说"每次返回都是对之前结果的追加"，而追加的
+         * 是**整句**。所以每一帧都覆盖第 1 段就是最新整句；服务端不给 sn 时 sn 取 1，
+         * 正好落在这里。
+         */
         snprintf(t->parts[sn - 1], sizeof(t->parts[0]), "%s", text);
         if (t->count < sn) {
             t->count = sn;
         }
     }
 
-    char after[IME_VOICE_TRANSCRIPT_MAX];
-    ime_voice_transcript_text(t, after, sizeof(after));
-    return (before_len != strlen(after)) || (strcmp(before, after) != 0);
+    /*
+     * 改动后的整句长度直接算出来，不必再开一个缓冲存它。
+     * 先用长度比（绝大多数帧在这一步就判完），长度相同才逐段比内容。
+     */
+    size_t after_len = 0;
+    for (int i = 0; i < t->count && i < IME_VOICE_MAX_PARTS; i++) {
+        after_len += strlen(t->parts[i]);
+    }
+    if (after_len != before_len) {
+        return true;
+    }
+
+    size_t off = 0;
+    for (int i = 0; i < t->count && i < IME_VOICE_MAX_PARTS; i++) {
+        const size_t n = strlen(t->parts[i]);
+        if (strncmp(before_scratch + off, t->parts[i], n) != 0) {
+            return true;
+        }
+        off += n;
+    }
+    return false;
 }
 
 size_t ime_voice_transcript_text(const ime_voice_transcript_t *t, char *out, size_t out_size)

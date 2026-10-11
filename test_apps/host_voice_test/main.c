@@ -233,7 +233,9 @@ static void test_auth_url(void)
     snprintf(p.appid, sizeof(p.appid), "%s", "12345678");
 
     char url[1024];
-    ok(ime_voice_build_auth_url(&p, "Wed, 10 Jul 2019 07:35:43 GMT", url, sizeof(url)),
+    /* 鉴权中间缓冲：真机上在会话工作区（堆），这里用静态变量 —— 都不能放任务栈。 */
+    static ime_voice_auth_scratch_t scratch;
+    ok(ime_voice_build_auth_url(&p, "Wed, 10 Jul 2019 07:35:43 GMT", &scratch, url, sizeof(url)),
        "能拼出鉴权 URL");
 
     /* 文档 §鉴权方法 给出的 authorization 原值 */
@@ -261,7 +263,7 @@ static void test_auth_url(void)
 
     /* 端点可换（私有部署 / 小语种走 iat-niche-api） */
     snprintf(p.endpoint, sizeof(p.endpoint), "%s", "wss://iat-niche-api.xfyun.cn/v2/iat");
-    ok(ime_voice_build_auth_url(&p, "Wed, 10 Jul 2019 07:35:43 GMT", url, sizeof(url)),
+    ok(ime_voice_build_auth_url(&p, "Wed, 10 Jul 2019 07:35:43 GMT", &scratch, url, sizeof(url)),
        "换小语种端点也能拼");
     ok(strstr(url, "iat-niche-api.xfyun.cn") != NULL, "URL 里是新端点");
 
@@ -274,7 +276,7 @@ static void test_auth_url(void)
      * 责任，这样测试能单独验签名算法。这里断言的是"用空密钥也能算出确定结果"，
      * 不崩即可。
      */
-    ok(ime_voice_build_auth_url(&bad, "Wed, 10 Jul 2019 07:35:43 GMT", url, sizeof(url)),
+    ok(ime_voice_build_auth_url(&bad, "Wed, 10 Jul 2019 07:35:43 GMT", &scratch, url, sizeof(url)),
        "空密钥下拼接不崩（校验由状态机做）");
 }
 
@@ -608,6 +610,98 @@ static void test_parse_reply(void)
 
 /* ------------------------------------------------------- 5. 动态修正段落表 */
 
+/**
+ * 流式性：**每收到一帧就要能拿到当前文本**，不是等最后才出字。
+ *
+ * 这是这个接口的核心价值（官方 Python demo 的 microphone_stream() 就是边收边用
+ * `\r` 覆盖刷新），所以用官方的 iat_pcm_16k.pcm 走一遍真实的帧序列钉住它。
+ *
+ * 帧序列按服务端的真实形状构造（**收尾帧不带 pgs，而且会重发最后一段**）：
+ *   sn=1 apd "今天"        → 今天
+ *   sn=2 apd "天气"        → 今天天气
+ *   sn=2 rpl [1,1] "明天"  → 明天天气
+ *   status=2, ls=true, sn=2, 无 pgs, ws=[{w:"明天"}]   → 仍是 明天天气
+ *
+ * 最后那条是这个用例最重要的断言：收尾帧重发的内容**不能**被当成新的一段，
+ * 否则整句会变成"明天明天"。这个 bug 真的写出来过，真机表现是"说完一句之后，
+ * 屏上最后一小段文字重复了一遍"。
+ */
+static void test_streaming(void)
+{
+    group("流式性：边收边出字");
+
+    /* 官方 demo 用的那份 16k PCM：确认它真的是一段音频，而且能按 40 ms 切帧 */
+    static const char *pcm_path =
+        "websdk-python-demo/xfyunsdkdemo/speech/resources/iat/iat_pcm_16k.pcm";
+    FILE *f = fopen(pcm_path, "rb");
+    if (f == NULL) {
+        printf("  skip  找不到官方 PCM 样例 %s（不影响其它用例）\n", pcm_path);
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    const long bytes = ftell(f);
+    fclose(f);
+
+    const long frames = bytes / IME_VOICE_FRAME_BYTES_16K;
+    ok(bytes >= IME_VOICE_FRAME_BYTES_16K, "官方 PCM 至少有一帧 1280 B");
+    /*
+     * 不写死帧数：官方这份样例是 152 320 B，不是整数个 40 ms 帧。真正要断言的是
+     * "能被切成帧"，以及"尾帧确实不满"—— 这正是组件最后一帧会短一点的原因
+     * （少发几字节，服务端一样接受）。
+     */
+    ok(frames > 100, "官方 PCM 有 100 帧以上（够覆盖一次完整会话）");
+    ok((bytes % IME_VOICE_FRAME_BYTES_16K) != 0, "官方 PCM 尾帧不满一帧（组件也允许这样）");
+    printf("         样例 %ld B = %ld 整帧 + %ld B 尾帧\n", bytes, frames,
+           bytes % IME_VOICE_FRAME_BYTES_16K);
+
+    /* 逐帧喂返回结果，每一步都断言"此刻屏幕上应该是什么" */
+    ime_voice_transcript_t t;
+    ime_voice_reply_t r;
+    static char snap[IME_VOICE_TRANSCRIPT_MAX];
+    char text[512];
+
+    ime_voice_transcript_reset(&t);
+
+    static const struct {
+        const char *json;
+        const char *expect;   /* 这一刻的整句 */
+        bool        is_last;  /* 是不是最后一块（status==2 或 ls==true） */
+    } seq[] = {
+        { "{\"code\":0,\"data\":{\"status\":1,\"result\":{\"sn\":1,\"pgs\":\"apd\","
+          "\"ws\":[{\"cw\":[{\"w\":\"\\u4eca\\u5929\"}]}]}}}", "今天", false },
+        { "{\"code\":0,\"data\":{\"status\":1,\"result\":{\"sn\":2,\"pgs\":\"apd\","
+          "\"ws\":[{\"cw\":[{\"w\":\"\\u5929\\u6c14\"}]}]}}}", "今天天气", false },
+        { "{\"code\":0,\"data\":{\"status\":1,\"result\":{\"sn\":2,\"pgs\":\"rpl\","
+          "\"rg\":[1,1],\"ws\":[{\"cw\":[{\"w\":\"\\u660e\\u5929\"}]}]}}}", "明天天气", false },
+        { "{\"code\":0,\"data\":{\"status\":2,\"result\":{\"ls\":true,\"sn\":2,"
+          "\"ws\":[{\"cw\":[{\"w\":\"\\u660e\\u5929\"}]}]}}}", "明天天气", true },
+    };
+
+    for (size_t i = 0; i < sizeof(seq) / sizeof(seq[0]); i++) {
+        ok(feed(seq[i].json, &r), "每帧都能解析");
+        /* 解析出来立刻就是可用的文本（这就是"实时"） */
+        ime_voice_transcript_apply(&t, &r, snap);
+        ime_voice_transcript_text(&t, text, sizeof(text));
+        eq_str(text, seq[i].expect, seq[i].expect);
+
+        /* 最后一块的判据：文档只定义了 status==2；ls 是同一件事的另一个字段 */
+        const bool is_last = (r.status == 2) || r.ls;
+        eq_int((long)is_last, (long)seq[i].is_last,
+               seq[i].is_last ? "末帧被识别为最后一块" : "中间帧不被当成最后一块");
+    }
+
+    /*
+     * 官方文档里 pgs 只有 apd / rpl 两个取值（"取值为 apd 时…取值为 rpl 时…"），
+     * 全文没有 rlt。官方 Python demo 的 iat_test.py 里写了一句
+     *     if result.get('pgs') == 'rlt' or chunk.get('status') == 2:
+     * —— 那是笔误（后面还 or status == 2，所以不影响 demo 自己工作）。
+     * 这里跑一遍是为了确认"未知 pgs 取值不会让解析失败"，免得以后有人照抄进 C。
+     */
+    ok(feed("{\"code\":0,\"data\":{\"status\":1,\"result\":{\"sn\":3,\"pgs\":\"rlt\","
+            "\"ws\":[{\"cw\":[{\"w\":\"X\"}]}]}}}", &r),
+       "未知 pgs 取值（如 demo 里的 rlt）不会让解析失败");
+}
+
 static void test_transcript(void)
 {
     group("动态修正：段落表拼接");
@@ -615,47 +709,49 @@ static void test_transcript(void)
     ime_voice_transcript_t t;
     ime_voice_reply_t r;
     char text[512];
+    /* 快照缓冲由调用方提供（真机上用的是会话工作区，见 ime_voice_scratch_t）。 */
+    static char snap[IME_VOICE_TRANSCRIPT_MAX];
 
     /* 未开 wpgs（没有 sn / pgs）：每次都是最新整句，覆盖第 1 段 */
     ime_voice_transcript_reset(&t);
     feed("{\"code\":0,\"data\":{\"status\":1,\"result\":{\"ws\":[{\"cw\":[{\"w\":\"\\u4f60\"}]}]}}}", &r);
-    ime_voice_transcript_apply(&t, &r);
+    ime_voice_transcript_apply(&t, &r, snap);
     ime_voice_transcript_text(&t, text, sizeof(text));
     eq_str(text, "你", "第一次 = 你");
 
     feed("{\"code\":0,\"data\":{\"status\":1,\"result\":{\"ws\":[{\"cw\":[{\"w\":\"\\u4f60\\u597d\"}]}]}}}", &r);
-    ime_voice_transcript_apply(&t, &r);
+    ime_voice_transcript_apply(&t, &r, snap);
     ime_voice_transcript_text(&t, text, sizeof(text));
     eq_str(text, "你好", "第二次覆盖成整句 = 你好（不是 你你好）");
 
     /* 开 wpgs：apd 追加 / rpl 替换 */
     ime_voice_transcript_reset(&t);
     feed("{\"code\":0,\"data\":{\"status\":1,\"result\":{\"sn\":1,\"pgs\":\"apd\",\"ws\":[{\"cw\":[{\"w\":\"\\u4eca\\u5929\"}]}]}}}", &r);
-    ime_voice_transcript_apply(&t, &r);
+    ime_voice_transcript_apply(&t, &r, snap);
     ime_voice_transcript_text(&t, text, sizeof(text));
     eq_str(text, "今天", "apd 第 1 段 = 今天");
 
     feed("{\"code\":0,\"data\":{\"status\":1,\"result\":{\"sn\":2,\"pgs\":\"apd\",\"ws\":[{\"cw\":[{\"w\":\"\\u5929\\u6c14\"}]}]}}}", &r);
-    ime_voice_transcript_apply(&t, &r);
+    ime_voice_transcript_apply(&t, &r, snap);
     ime_voice_transcript_text(&t, text, sizeof(text));
     eq_str(text, "今天天气", "apd 第 2 段追加 = 今天天气");
 
     /* 服务端回头修正第 1 段：rg=[1,1] + rpl */
     feed("{\"code\":0,\"data\":{\"status\":1,\"result\":{\"sn\":2,\"pgs\":\"rpl\",\"rg\":[1,1],"
          "\"ws\":[{\"cw\":[{\"w\":\"\\u660e\\u5929\"}]}]}}}", &r);
-    ime_voice_transcript_apply(&t, &r);
+    ime_voice_transcript_apply(&t, &r, snap);
     ime_voice_transcript_text(&t, text, sizeof(text));
     eq_str(text, "明天天气", "rpl 替换第 1 段 = 明天天气");
 
     /* 替换两段：rg=[1,2] */
     ime_voice_transcript_reset(&t);
     feed("{\"code\":0,\"data\":{\"status\":1,\"result\":{\"sn\":1,\"pgs\":\"apd\",\"ws\":[{\"cw\":[{\"w\":\"A\"}]}]}}}", &r);
-    ime_voice_transcript_apply(&t, &r);
+    ime_voice_transcript_apply(&t, &r, snap);
     feed("{\"code\":0,\"data\":{\"status\":1,\"result\":{\"sn\":2,\"pgs\":\"apd\",\"ws\":[{\"cw\":[{\"w\":\"B\"}]}]}}}", &r);
-    ime_voice_transcript_apply(&t, &r);
+    ime_voice_transcript_apply(&t, &r, snap);
     feed("{\"code\":0,\"data\":{\"status\":1,\"result\":{\"sn\":2,\"pgs\":\"rpl\",\"rg\":[1,2],"
          "\"ws\":[{\"cw\":[{\"w\":\"C\"}]}]}}}", &r);
-    ime_voice_transcript_apply(&t, &r);
+    ime_voice_transcript_apply(&t, &r, snap);
     ime_voice_transcript_text(&t, text, sizeof(text));
     eq_str(text, "C", "rg=[1,2] 把两段合成一段 C");
 
@@ -663,15 +759,15 @@ static void test_transcript(void)
     ime_voice_reply_t r2;
     feed("{\"code\":0,\"data\":{\"status\":1,\"result\":{\"sn\":2,\"pgs\":\"rpl\",\"rg\":[1,2],"
          "\"ws\":[{\"cw\":[{\"w\":\"C\"}]}]}}}", &r2);
-    ime_voice_transcript_apply(&t, &r2);
-    ok(!ime_voice_transcript_apply(&t, &r2), "重复同一帧报告无变化");
+    ime_voice_transcript_apply(&t, &r2, snap);
+    ok(!ime_voice_transcript_apply(&t, &r2, snap), "重复同一帧报告无变化");
 
     /* 段号超上限不能越界（服务端理论上不会给，但 sn 是外部输入） */
     ime_voice_transcript_reset(&t);
     feed("{\"code\":0,\"data\":{\"status\":1,\"result\":{\"sn\":9999,\"pgs\":\"rpl\","
          "\"rg\":[1,9999],\"ws\":[{\"cw\":[{\"w\":\"X\"}]}]}}}",
          &r);
-    ime_voice_transcript_apply(&t, &r);
+    ime_voice_transcript_apply(&t, &r, snap);
     ime_voice_transcript_text(&t, text, sizeof(text));
     eq_str(text, "X", "超范围 sn/rg 被钳位，不越界");
 
@@ -746,6 +842,7 @@ int main(void)
     test_auth_url();
     test_request_frames();
     test_parse_reply();
+    test_streaming();
     test_transcript();
     test_filter();
 

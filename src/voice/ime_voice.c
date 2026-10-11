@@ -105,6 +105,38 @@ static const char *TAG = "ime_voice";
 /** 一帧音频的节拍（文档建议值）。 */
 #define IME_VOICE_TICK_MS IME_VOICE_FRAME_MS
 
+/**
+ * 语音任务的栈深度。
+ *
+ * ★ 单位是**字节**，不是字。ESP-IDF 的 FreeRTOS 端口里
+ *   `portSTACK_TYPE` 就是 `uint8_t`（见 FreeRTOS-Kernel/portable/riscv 与
+ *   /portable/xtensa 的 portmacro.h），所以 xTaskCreate 的这个参数直接就是字节数。
+ *
+ *   这里踩过坑：曾经按"字"理解写成 1536，以为等于 6 KB，实际只给了 1536 字节，
+ *   而 `ime_voice_build_auth_url()` 一个函数就要 2.3 KB 局部数组 —— 一按语音键
+ *   立刻 Stack protection fault：
+ *
+ *     Detected in task "ime_voice" at ime_voice_build_auth_url
+ *     Stack bounds: 0x2f04310c - 0x2f043700   ← 1524 字节，就是这个值
+ *     Stack pointer: 0x2f042df0               ← 越界 796 字节
+ *
+ * 现在的大缓冲全都在会话工作区（堆）上，栈上最大的几条链实测如下
+ * （-fstack-usage，tools/check_stack_usage.ps1）：
+ *
+ *   voice_task                                   112 B
+ *   └ build_auth_url_now 80 → build_auth_url 96 → hmac_sha256 368 → sha256_block 352
+ *                                                合计 ≈ 1008 B   ← 最坏
+ *   └ handle_reply 112 → parse_reply 80 → parse_result 144 → parse_seg 96
+ *                                                合计 ≈   560 B
+ *
+ * build_auth_url 曾经是 2464 B（一串局部数组），**一按下语音键就崩** —— 那是这个
+ * 8192 的由来，也是为什么那些缓冲现在在堆上。
+ *
+ * 8192 字节相对最坏链约 1 KB 有 8 倍余量，足够吸收 IDF/FreeRTOS/日志这些不在我们
+ * 统计里的调用。**调小之前先跑 tools/check_stack_usage.ps1。**
+ */
+#define IME_VOICE_TASK_STACK 8192
+
 /* b64：131 K 是 16k 采样率下 5.5 秒的音频，够用且不会让帧长得离谱。 */
 #define IME_VOICE_FRAME_MAX_B64 (IME_VOICE_FRAME_BYTES_16K * 2 + 64)
 #define IME_VOICE_FIRST_FRAME_MAX (IME_VOICE_FIRST_FRAME_OVERHEAD + IME_VOICE_FRAME_MAX_B64 + 64)
@@ -118,6 +150,44 @@ typedef struct {
     char  *json;                /* 堆上，处理完 free */
     size_t len;
 } voice_msg_t;
+
+/**
+ * 会话的临时工作区：堆上，随会话分配一次，任务循环反复复用。
+ *
+ * ★ 这些原来都是**任务里的局部变量**，那是真机上崩溃的直接原因：
+ *
+ *     ime_voice_reply_t 一个就 12 744 B（segs[32] × 392 B），而语音任务的栈当时
+ *     只有 4096 B。ESP-IDF 建任务时按 4096 字（16 KB）算，扣掉内核与日志开销剩
+ *     8 KB —— 仍然装不下 12.7 KB 的局部变量，于是**第一帧返回**就砸了：
+ *
+ *       Guru Meditation Error: Core 0 panic'ed (Stack protection fault)
+ *       Detected in task "ime_voice" at handle_reply ... ime_voice.c:344
+ *       Stack bounds: 0x2f04310c - 0x2f045100   SP: 0x2f041e50
+ *
+ *   修法不是"把栈调大"：12.7 KB 的局部变量本身就不该出现在任何任务栈上（LVGL
+ *   所在的主任务也才 12 KB）。搬到堆上之后，栈占用回到几十字节，任务栈小一点都行。
+ *
+ * 访问约定：只在**组件任务**里用（handle_reply / voice_task 都在该任务内），
+ * 所以不需要加锁。唯一例外是 before_text，见 ime_voice_transcript_apply()。
+ */
+typedef struct {
+    /** 解析后的返回帧：最大的一块，也是崩溃的元凶。 */
+    ime_voice_reply_t reply;
+    /** 动态修正前后的整句快照，用来判断"界面要不要重画"。 */
+    char before_text[IME_VOICE_TRANSCRIPT_MAX];
+    /** 拼下一帧 JSON 用的缓冲（首帧比后续帧大：多带 common + business）。 */
+    char frame[IME_VOICE_FIRST_FRAME_MAX];
+    /** 从麦克风读一帧 PCM 的缓冲。 */
+    uint8_t pcm[IME_VOICE_FRAME_BYTES_16K];
+    /**
+     * 拼鉴权 URL 的中间缓冲（约 2.3 KB）。
+     *
+     * ★ 它也必须在堆上：原来这些是 ime_voice_build_auth_url() 里的局部数组，真机上
+     *   一进函数就栈溢出 —— 那个任务的栈当时只有 1536 **字节**，而函数要 2.3 KB。
+     *   详见头文件里 ime_voice_auth_scratch_t 的注释。
+     */
+    ime_voice_auth_scratch_t auth;
+} ime_voice_scratch_t;
 
 struct lv_pinyin_ime_voice {
     lv_pinyin_ime_voice_cfg_t cfg;
@@ -150,18 +220,102 @@ struct lv_pinyin_ime_voice {
     /* 上一帧是否失败（连续失败才报错，偶发一次不打断会话） */
     int consecutive_audio_errors;
 
+    /* 音频电平判定：本次会话里峰值低于静音阈值的帧数。 */
+    uint32_t silent_frames;
+    /** 本次会话里最大的那一帧峰值（用来给"为什么没识别出来"下结论）。 */
+    uint32_t peak_max;
+
     /* 回调 */
     lv_pinyin_ime_voice_cb_t state_cb;
     void                    *state_cb_user;
     lv_pinyin_ime_voice_cb_t result_cb;
     void                    *result_cb_user;
 
-    /* 帧缓冲：都在组件任务里用，不需要锁 */
-    uint8_t pcm[IME_VOICE_FRAME_BYTES_16K];
-    char    frame[IME_VOICE_FIRST_FRAME_MAX];
+    /** 临时工作区：堆上，见上面的说明。 */
+    ime_voice_scratch_t scratch;
 };
 
+/*
+ * ★ 编译期护栏：不许再把大块缓冲放回任务栈。
+ *
+ * 这个坑踩过三次（reply 12.7 KB、auth scratch 2.3 KB、还有一次把栈深度按"字"当
+ * "字节"用），每次都是真机 Stack protection fault。编译器不会为大局部变量报警，
+ * 所以用断言把关键事实钉住：
+ *
+ *   1. 工作区里必须有 reply 和 auth 两块缓冲（谁把它们挪回局部变量，结构体就会
+ *      变小，断言立刻失败）；
+ *   2. 任务栈深度（字节）不能低于 4 KB —— 防止再有人按"字"把它写成一千多。
+ */
+_Static_assert(sizeof(((ime_voice_scratch_t *)0)->reply) == sizeof(ime_voice_reply_t),
+               "scratch.reply must stay in the heap-side workspace");
+_Static_assert(sizeof(ime_voice_scratch_t) >=
+                   sizeof(ime_voice_reply_t) + sizeof(ime_voice_auth_scratch_t),
+               "scratch must hold both the reply and the auth buffer (heap-side)");
+_Static_assert(IME_VOICE_TASK_STACK >= 4096,
+               "the voice task stack is a BYTE count (StackType_t is uint8_t in the "
+               "ESP-IDF ports); do not shrink it below 4 KB");
+
 /* ------------------------------------------------------------ 小工具 */
+
+/**
+ * 整数平方根（向下取整）。
+ *
+ * 为什么不用 __builtin_sqrt：那会引入浮点指令与 libm 的一小段代码，在 MCU 上既
+ * 费 flash 又有自己的栈开销 —— 而这个函数只是给日志算一个 RMS 量级，用整数足够。
+ */
+static uint32_t isqrt_u32(uint64_t x)
+{
+    if (x == 0) {
+        return 0;
+    }
+    uint64_t r = x;
+    uint64_t r1 = (r + 1u) / 2u;
+    /* 牛顿迭代，收敛很快；最多几轮就到不动点。 */
+    while (r1 < r) {
+        r = r1;
+        r1 = (r + x / r) / 2u;
+    }
+    return (uint32_t)r;
+}
+
+/**
+ * 把"最高位以下那一段"换算成 dB（×10，即分贝的十分位）。
+ *
+ * 表里是 `10 * 20 * log10(1 + i/16)`，i = 0..15，也就是把每两个二进制位之间
+ * 线性插值成 16 档。**预计算成整数表**，运行时不做任何浮点运算
+ * （上一版这里写了 `* 6.0206f`，在 MCU 上会白拉进浮点支持，属于自己反对过的做法）。
+ */
+static const int16_t s_db_tenths[16] = {
+    0, 5, 10, 15, 20, 24, 29, 33, 38, 42, 46, 50, 54, 58, 62, 66
+};
+
+/**
+ * 16 bit 满量程幅值 → dBFS（0 = 满量程，负得越多越安静）。
+ *
+ * 为什么要换算成 dB：光看 `peak=234 rms=15` 很难判断"这算不算小"。换算之后一眼
+ * 就看出来：
+ *
+ *   peak=234  → 约 -43 dBFS     ← 比正常说话低 20~35 dB，VAD 根本不会触发
+ *   peak=3277 → 约 -20 dBFS     ← 正常说话的下限
+ *   peak=16384→ 约 -6  dBFS     ← 大声说话
+ *
+ * 这正是"说了话却什么都没识别出来"的量化判据。
+ */
+static int dbfs_from_amplitude(uint32_t amp)
+{
+    if (amp == 0) {
+        return -120;                    /* 完全静音，给个下限 */
+    }
+    int bits = 0;
+    for (uint32_t v = amp >> 1; v != 0; v >>= 1) {
+        bits++;                         /* bits = floor(log2(amp)) */
+    }
+    const uint32_t base = 1u << bits;   /* amp / base 落在 [1,2) */
+    const int idx = (int)(((amp - base) * 16u) / base);
+    /* 每高一位 = 6.02 dB = 60.2 个十分位；满量程 15 位对应 90.3 dB */
+    const int tenths = bits * 602 / 10 + s_db_tenths[(idx < 16) ? idx : 15];
+    return (tenths - 903) / 10;
+}
 
 static void lock(lv_pinyin_ime_voice_t *v)
 {
@@ -287,6 +441,49 @@ static void finish_session(lv_pinyin_ime_voice_t *v, lv_pinyin_ime_voice_err_t e
 
     IME_LOGI(TAG, "session finished: err=%d server=%d text=\"%s\" audio=%ums",
              (int)err, server_code, v->text, (unsigned)v->audio_ms);
+
+    /*
+     * 结果是空的时候，把"为什么空"直接说清楚 —— 连同实测电平一起给。
+     *
+     * 这是被真机逼出来的诊断：服务端拿到静音音频时会**正常**返回一个空结果
+     * （code=0、status=2、ws=[]），组件于是报 err=0、text=""，光看这行日志完全
+     * 看不出问题在麦克风侧。实测的那次就是 peak=234（约 -43 dBFS）、rms=15，
+     * 比正常说话低 20~35 dB，服务端 VAD 自然不触发。
+     */
+    if (v->text[0] == '\0' && v->audio_ms > 0) {
+        const uint32_t frames = v->audio_ms / IME_VOICE_FRAME_MS;
+        const int peak_db = dbfs_from_amplitude(v->peak_max);
+        if (v->silent_frames >= frames && frames > 0) {
+            IME_LOGW(TAG, "empty result: all %u frames were below -40 dBFS "
+                          "(session peak %u = %d dBFS) -- the microphone captured no "
+                          "speech. Check, in this order: (1) channel selection -- the "
+                          "codec runs 2ch, the mono downmix may be taking the silent "
+                          "one; (2) codec ADC gain; (3) mic routing/power",
+                     (unsigned)frames, (unsigned)v->peak_max, peak_db);
+        } else if (peak_db < -30) {
+            IME_LOGW(TAG, "empty result: audio peaked at only %d dBFS (peak %u); speech "
+                          "should reach -20..-6 dBFS -- add gain, the server's VAD never "
+                          "triggered",
+                     peak_db, (unsigned)v->peak_max);
+        } else {
+            IME_LOGW(TAG, "empty result but audio peaked at %d dBFS (peak %u) -- the "
+                          "level is fine, so suspect the sample rate or PCM format "
+                          "(e.g. resampling 48k->16k by the wrong factor plays back "
+                          "slow/fast and the server hears nonsense)",
+                     peak_db, (unsigned)v->peak_max);
+        }
+    } else if (v->peak_max > 0) {
+        /* 有结果时也报一下电平：识别"漏字"往往就是电平偏低导致的。 */
+        const int peak_db = dbfs_from_amplitude(v->peak_max);
+        if (peak_db < -25) {
+            IME_LOGW(TAG, "recognised \"%s\" but audio only peaked at %d dBFS -- a low "
+                          "level like this drops characters; consider more mic gain",
+                     v->text, peak_db);
+        } else {
+            IME_LOGI(TAG, "audio peak was %d dBFS (healthy range is -20..-6)",
+                     peak_db);
+        }
+    }
 }
 
 /* ------------------------------------------------------------ 消息队列 */
@@ -343,33 +540,35 @@ static char *queue_pop(lv_pinyin_ime_voice_t *v, size_t *len)
  */
 static bool handle_reply(lv_pinyin_ime_voice_t *v, char *json, size_t len, bool *final_out)
 {
-    ime_voice_reply_t r;
+    /* ★ 12.7 KB 的结构体，必须放在会话的工作区（堆）上 —— 见 ime_voice_scratch_t。 */
+    ime_voice_reply_t *r = &v->scratch.reply;
     *final_out = false;
 
-    if (!ime_voice_parse_reply(json, len, &r)) {
+    if (!ime_voice_parse_reply(json, len, r)) {
         IME_LOGW(TAG, "unparsable reply (%u bytes), ignored", (unsigned)len);
         return false;
     }
 
-    if (r.code != 0) {
-        IME_LOGE(TAG, "server error code=%d message=\"%s\"", r.code, r.message);
+    if (r->code != 0) {
+        IME_LOGE(TAG, "server error code=%d message=\"%s\"", r->code, r->message);
         lock(v);
-        v->server_code = r.code;
+        v->server_code = r->code;
         unlock(v);
         return true;                    /* 服务端报错：立刻收尾 */
     }
 
-    if (!r.has_result) {
+    if (!r->has_result) {
         return false;                   /* 握手后的空帧之类，忽略 */
     }
 
     lock(v);
-    const bool changed = ime_voice_transcript_apply(&v->transcript, &r);
+    const bool changed = ime_voice_transcript_apply(&v->transcript, r,
+                                                    v->scratch.before_text);
     if (changed) {
         ime_voice_transcript_text(&v->transcript, v->text, sizeof(v->text));
     }
     /* data.status == 2 或 result.ls == true 都表示"最后一块"。 */
-    const bool last = (r.status == 2) || r.ls;
+    const bool last = (r->status == 2) || r->ls;
     unlock(v);
 
     if (last) {
@@ -385,6 +584,11 @@ static void voice_task(void *arg)
 {
     lv_pinyin_ime_voice_t *v = (lv_pinyin_ime_voice_t *)arg;
     const lv_pinyin_ime_voice_host_t *host = v->cfg.host;
+    /* 帧与 PCM 缓冲都在会话的工作区（堆）上：它们是 3.9 KB，放栈上会把这 4 KB 的
+     * 任务栈吃掉一大半。用局部别名只是为了下面几行好读。 */
+    char    *frame = v->scratch.frame;
+    uint8_t *pcm = v->scratch.pcm;
+    const size_t frame_cap = sizeof(v->scratch.frame);
 
     /* --- 1. 鉴权 + 连接 --- */
     int64_t now = (int64_t)time(NULL);
@@ -395,14 +599,14 @@ static void voice_task(void *arg)
         goto done;
     }
 
-    if (!ime_voice_build_auth_url_now(&v->params, now, v->frame, sizeof(v->frame))) {
+    if (!ime_voice_build_auth_url_now(&v->params, now, &v->scratch.auth, frame, frame_cap)) {
         IME_LOGE(TAG, "cannot build the auth url");
         finish_session(v, LV_PINYIN_IME_VOICE_ERR_WS_OPEN, 0);
         goto done;
     }
 
     IME_LOGI(TAG, "connecting: %s", v->params.endpoint);
-    if (host->ws_open(host->user, v->frame) != 0) {
+    if (host->ws_open(host->user, frame) != 0) {
         IME_LOGE(TAG, "ws_open failed");
         finish_session(v, LV_PINYIN_IME_VOICE_ERR_WS_OPEN, 0);
         goto done;
@@ -414,6 +618,7 @@ static void voice_task(void *arg)
     const size_t frame_bytes = ime_voice_frame_bytes(v->params.rate);
     uint32_t elapsed_ms = 0;
     uint32_t finish_deadline_ms = 0;
+    uint32_t frame_index = 0;           /* 已发送的音频帧序号（诊断用） */
     bool     sent_last = false;
     bool     server_final = false;
     bool     forced_stop = false;
@@ -438,9 +643,9 @@ static void voice_task(void *arg)
                 }
                 /* 服务端主动结束（正常或 status==2）：收尾 */
                 if (!sent_last) {
-                    const size_t n = ime_voice_build_last_frame(v->frame, sizeof(v->frame));
+                    const size_t n = ime_voice_build_last_frame(frame, frame_cap);
                     if (n > 0) {
-                        (void)host->ws_send_text(host->user, v->frame);
+                        (void)host->ws_send_text(host->user, frame);
                     }
                     sent_last = true;
                 }
@@ -475,8 +680,8 @@ static void voice_task(void *arg)
                          (unsigned)IME_VOICE_MAX_SESSION_MS);
                 forced_stop = true;
             }
-            const size_t n = ime_voice_build_last_frame(v->frame, sizeof(v->frame));
-            if (n == 0 || host->ws_send_text(host->user, v->frame) != 0) {
+            const size_t n = ime_voice_build_last_frame(frame, frame_cap);
+            if (n == 0 || host->ws_send_text(host->user, frame) != 0) {
                 finish_session(v, LV_PINYIN_IME_VOICE_ERR_WS_SEND, 0);
                 goto done;
             }
@@ -505,9 +710,42 @@ static void voice_task(void *arg)
             continue;
         }
 
-        /* 2e. 读一帧麦克风数据并发出去 */
-        int got = host->audio_read(host->user, v->pcm, frame_bytes, IME_VOICE_TICK_MS * 2);
-        if (got < 0) {
+        /* 2e. 读一帧麦克风数据并发出去。
+         *
+         * ★ 一次读不满就再读几次，直到凑够一帧或调用方明确返回 0/超时。
+         *
+         *   为什么：I2S / codec 驱动常按它自己的块大小（512、1024 B）返回，一次
+         *   只给一小块。早期版本把这一小块当成"一整帧的 40 ms 音频"直接发出去，
+         *   于是音频时间轴被拉长（发 1280 B 才等于 40 ms，实际只发了 512 B），
+         *   服务端拿到的是**慢放且断续**的音频 —— 真机表现就是"明明说了话，
+         *   却什么都没识别出来"，而且没有任何报错。
+         *
+         *   这里是兜底：即使调用方没在自己的回调里循环读满，组件也尽量把一帧凑齐。
+         */
+        size_t got = 0;
+        bool audio_error = false;
+        int last_rc = 0;
+        const uint32_t read_deadline = t0 + IME_VOICE_TICK_MS * 2;
+        while (got < frame_bytes) {
+            last_rc = host->audio_read(host->user, pcm + got, frame_bytes - got, 5);
+            if (last_rc < 0) {
+                audio_error = true;
+                break;
+            }
+            if (last_rc == 0) {
+                /* 这一拍没数据了：就用已经拿到的部分（可能是 0），别死等。 */
+                break;
+            }
+            got += (size_t)last_rc;
+
+            /* 已经超过这一拍的时间预算，或者拿到了完整的一帧，就停 */
+            const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+            if ((int32_t)(now_ms - read_deadline) >= 0) {
+                break;
+            }
+        }
+
+        if (audio_error) {
             v->consecutive_audio_errors++;
             /* 偶发一次（I2S 抖动、DMA 欠载）不该打断整段识别，连续失败才报错。 */
             if (v->consecutive_audio_errors >= 5) {
@@ -521,28 +759,68 @@ static void voice_task(void *arg)
         } else {
             v->consecutive_audio_errors = 0;
         }
-        if ((size_t)got > frame_bytes) {
-            got = (int)frame_bytes;     /* 回调多给了：只发一帧的量，多的丢掉 */
+        (void)last_rc;
+
+        /* 音频电平：区分"真的在说话"和"读到的是静音/噪声"。
+         *
+         * 这一条是排查"说了话却没识别出来"的关键：服务端拿到一片静音时会老老实实
+         * 回一个 status=2 的**空**结果，于是 text 为空、err=0，从日志上完全看不出
+         * 问题在麦克风侧。这里把峰值换成 dBFS 打出来，一眼就能判断：
+         *
+         *   peak=3277  → 约 -20 dBFS   正常说话的下限
+         *   peak=16384 → 约  -6 dBFS   大声说话
+         *   peak=234   → 约 -43 dBFS   ← 实测见过这个值：比正常说话低 20~35 dB，
+         *                                服务端 VAD 根本不会触发，所以识别为空
+         *
+         * 只打前 3 帧和每 2 秒一次的采样，不会刷屏。 */
+        {
+            const int16_t *s = (const int16_t *)pcm;
+            const size_t nsamp = got / sizeof(int16_t);
+            uint32_t peak = 0;
+            uint64_t sum_sq = 0;
+            for (size_t i = 0; i < nsamp; i++) {
+                int32_t v32 = s[i];
+                uint32_t a = (uint32_t)((v32 < 0) ? -v32 : v32);
+                if (a > peak) {
+                    peak = a;
+                }
+                sum_sq += (uint64_t)(a * a);
+            }
+            const uint32_t rms = (nsamp > 0) ? isqrt_u32(sum_sq / (uint64_t)nsamp) : 0u;
+
+            if (peak > v->peak_max) {
+                v->peak_max = peak;
+            }
+
+            if (frame_index < 3 || (frame_index % 50) == 0) {
+                IME_LOGI(TAG, "audio frame %u: got=%u/%u B peak=%u (%d dBFS) rms=%u",
+                         (unsigned)frame_index, (unsigned)got, (unsigned)frame_bytes,
+                         (unsigned)peak, dbfs_from_amplitude(peak), (unsigned)rms);
+            }
+
+            /* 声学上持续低于约 -40 dBFS 基本就是静音（正常说话 -20 dBFS 起步）。 */
+            if (dbfs_from_amplitude(peak) < -40) {
+                v->silent_frames++;
+            }
         }
 
         size_t n;
         if (elapsed_ms == 0) {
-            n = ime_voice_build_first_frame(&v->params, v->pcm, (size_t)got, v->frame,
-                                            sizeof(v->frame));
+            n = ime_voice_build_first_frame(&v->params, pcm, got, frame, frame_cap);
         } else {
-            n = ime_voice_build_audio_frame(&v->params, v->pcm, (size_t)got, v->frame,
-                                            sizeof(v->frame));
+            n = ime_voice_build_audio_frame(&v->params, pcm, got, frame, frame_cap);
         }
         if (n == 0) {
             IME_LOGE(TAG, "frame build failed (%u bytes)", (unsigned)got);
             finish_session(v, LV_PINYIN_IME_VOICE_ERR_WS_SEND, 0);
             goto done;
         }
-        if (host->ws_send_text(host->user, v->frame) != 0) {
+        if (host->ws_send_text(host->user, frame) != 0) {
             IME_LOGE(TAG, "ws_send_text failed");
             finish_session(v, LV_PINYIN_IME_VOICE_ERR_WS_SEND, 0);
             goto done;
         }
+        frame_index++;
 
         elapsed_ms += IME_VOICE_TICK_MS;
         lock(v);
@@ -561,6 +839,26 @@ static void voice_task(void *arg)
     }
 
 done:
+    /*
+     * 报一次这个任务真实的栈余量。
+     *
+     * 为什么值得写一行日志：上面那次 12.7 KB 的栈溢出，事后只能靠"崩了"来发现。
+     * uxTaskGetStackHighWaterMark() 给的是**历史最小剩余量**（字），所以每次会话
+     * 结束都会告诉我们"离溢出还有多远"：
+     *
+     *   - 余量稳定在几百字节以上  → 栈够
+     *   - 余量接近 0 或报警        → 有新的大家伙混进栈里了，去查局部变量
+     *
+     * 只在会话结束时打一次，开销可以忽略。按字（4 字节）换算成字节显示。
+     */
+    const UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
+    /* ★ hwm 的单位是 StackType_t 个数，而这个端口里 StackType_t 就是 1 字节，
+     *   所以它**已经**是字节数。写 sizeof(StackType_t) 只是把这件事说清楚，
+     *   顺带在别的端口（StackType_t 是 4 字节的）上也算对。 */
+    IME_LOGI(TAG, "voice task stack free at exit: %u B (high-water mark) -- "
+                  "near zero means something large moved onto the stack",
+             (unsigned)(hwm * sizeof(StackType_t)));
+
     v->task_running = false;
     v->task = NULL;
     vTaskDelete(NULL);
@@ -747,14 +1045,54 @@ int lv_pinyin_ime_voice_start(lv_pinyin_ime_voice_t *v)
     v->ws_open_done = false;
     v->ws_closed_by_peer = false;
     v->consecutive_audio_errors = 0;
+    v->silent_frames = 0;
     unlock(v);
 
     set_state(v, LV_PINYIN_IME_VOICE_CONNECTING);
 
     v->task_running = true;
-    /* 栈：解析 + 拼 2 KB 的帧 + snprintf，4 KB 够；优先级低于 LVGL 所在的主任务
-     * （app_main 是 1），避免 40 ms 的节拍把渲染挤掉。 */
-    const BaseType_t ok = xTaskCreate(voice_task, "ime_voice", 4096, v, 2, &v->task);
+    /*
+     * 栈：**6144 字节**（不是拍脑袋，是用 -fstack-usage 量出来的）。
+     *
+     * ⚠ 这里踩过两次，记清楚，免得再改回去：
+     *
+     *   第一次（写成 4096）崩在**签名路径**：build_auth_url() 的局部数组
+     *   （authorization[512] + enc_auth[768] + auth_origin[320] + enc_host[192]
+     *     + origin[320] + host_str[128] ≈ 2.2 KB）叠上日志的 snprintf 就超了。
+     *
+     *   第二次（已经调到 8192）崩在**返回帧解析**：
+     *     Guru Meditation Error: Core 0 panic'ed (Stack protection fault)
+     *     Detected in task "ime_voice" at handle_reply (ime_voice.c:344)
+     *     Stack bounds: 0x2f04310c - 0x2f045100   ← 8192 字节
+     *     Stack pointer: 0x2f041e50               ← 已越过下边界约 4.8 KB
+     *   根因不是"栈不够大"，而是 handle_reply() 里那句
+     *   `ime_voice_reply_t r;` —— **这个结构体单独就 12 744 字节**
+     *   （segs[32] × 392 B）。栈开到多大都不该放它。
+     *
+     *   所以真正的修法是把大缓冲搬进会话的工作区（ime_voice_scratch_t，堆上）：
+     *   reply 12.7 KB、拼帧缓冲 3.2 KB、PCM 1.25 KB、整句快照 640 B，合计约 17.9 KB，
+ *   随会话 malloc 一次、任务循环反复复用。
+     *
+     * 量出来的实际栈深（tools/check_stack_usage.ps1，交叉编译器 -fstack-usage）：
+     *
+     *   voice_task                    112 B
+     *   签名路径  build_auth_url     2464 B   ← 最坏的一条
+     *             └ hmac_sha256       368 B
+     *             └ sha256_block      352 B
+     *             合计 ≈ 3248 B
+     *   收帧路径  handle_reply        112 B → parse_reply 80 → parse_result 144
+     *             → parse_seg 64 → parse_cw 96                  合计 ≈ 528 B
+     *   拼帧路径  build_first_frame    96 B                       合计 ≈ 208 B
+     *
+     * 6144 B 相对最坏值 3248 B 留了约 2.9 KB（≈90%）余量，用来吸收
+     * ESP_LOG 的 snprintf、mbedtls/psa 初始化等库调用自己的栈 —— 那些不在我们
+     * 的 .su 统计里。任务只在一次识别会话期间存在（结束即 vTaskDelete），
+     * 多留 1 KB 比再崩一次划算。
+     *
+     * 优先级仍低于 LVGL 主任务（app_main = 1），避免 40 ms 的节拍把渲染挤掉。
+     */
+    const BaseType_t ok = xTaskCreate(voice_task, "ime_voice", IME_VOICE_TASK_STACK, v, 2,
+                                      &v->task);
     if (ok != pdPASS) {
         v->task_running = false;
         lock(v);

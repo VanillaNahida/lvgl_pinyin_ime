@@ -59,37 +59,71 @@ static bool font_has_cp(const lv_font_t *font, uint32_t cp)
 }
 
 /**
+ * 数一个 UTF-8 串里有几个字符（LVGL 的删除函数是按字符算的，见下）。
+ *
+ * 只数首字节：`0xxxxxxx`、`110xxxxx`、`1110xxxx`、`11110xxx` 都不会是 `10xxxxxx`
+ * 的续字节，所以"不是续字节的字节数"就是字符数。
+ */
+static uint32_t utf8_count_chars(const char *s, size_t len)
+{
+    uint32_t n = 0;
+    for (size_t i = 0; i < len && s[i] != '\0'; i++) {
+        if (((unsigned char)s[i] & 0xC0u) != 0x80u) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/**
  * 把识别结果写进输入框。
  *
- * 做法是"撤掉本会话上一次写的，再写新的"：只要输入框的改动都发生在光标之后，
- * 这个算式就成立。它天然覆盖三种情况：
- *   光标在末尾        → 等价于追加
- *   光标在文字中间    → 插入，且下一次替换仍然命中同一段
- *   用户中途手改了输入框 → 算式落到别处，但**不会算错位置**（越界会被钳住），
- *                          而且下一次预览会自己纠正回来
+ * ★ 为什么不能用"字节数"记账（这里踩过坑）：
  *
- * @param commit true 表示这是最终结果（预览到此结束）
+ *   LVGL 的 `lv_textarea_delete_char()` 删的是**一个 UTF-8 字符**，而不是一个字节
+ *   （看它的实现：`lv_text_cut(label_txt, pos - 1, 1)`）。而一个汉字是 3 字节，
+ *   所以拿"上次写了多少字节"当成"要删几个字符"会**多删两倍的字** —— 中文场景下
+ *   每次实时刷新都会把已经上屏的文字啃掉一大块，表现为"越刷越少/看着像没上屏"。
+ *
+ *   ⚠ 我自己那个 C 测试覆盖不到这条路径：`host_voice_test` 测的是协议层（段落表），
+ *     而这里是 LVGL 控件行为，只有真机或 LVGL 主机端渲染测试才碰得到。
+ *
+ * ★ 记一次快照（ctx->voice_base）：如果用户中途手改了输入框，快照对不上就**不删**、
+ *   直接追加 —— 宁可多几个字，也不要把用户自己打的、或上一句话的内容删掉。
+ *
+ * @param text          要写入的文本
+ * @param char_count    写入的字符数（不是字节数！）
+ * @param base_snapshot 本段预览开始**之前**的输入框内容（用于校验是否被改过）
  */
-static void voice_write_text(lv_obj_t *ta, const char *text, size_t *written)
+static void voice_write_text(lv_obj_t *ta, const char *text, uint32_t char_count,
+                             const char *base_snapshot)
 {
     if (ta == NULL || text == NULL) {
         return;
     }
 
-    const uint32_t cursor = lv_textarea_get_cursor_pos(ta);
-    const uint32_t prev = (written != NULL) ? (uint32_t)*written : 0u;
-
-    if (prev > 0 && cursor >= prev) {
-        lv_textarea_set_cursor_pos(ta, cursor - prev);
-        for (uint32_t i = 0; i < prev; i++) {
-            lv_textarea_delete_char(ta);
+    /* 1. 先试着撤掉上一次预览：只有在"输入框仍以那段基线开头"时才敢删。 */
+    if (char_count > 0 && base_snapshot != NULL) {
+        const char *cur = lv_textarea_get_text(ta);
+        const size_t base_len = strlen(base_snapshot);
+        if (cur != NULL && base_len > 0 && strncmp(cur, base_snapshot, base_len) == 0 &&
+            cur[base_len] != '\0') {
+            /* 预览就接在基线后面：从 base_len 处开始删 char_count 个字符。
+             * 删一个字符后后面的文字会前移，所以每次都从同一位置删。 */
+            for (uint32_t i = 0; i < char_count; i++) {
+                if (utf8_count_chars(cur, strlen(cur)) <= utf8_count_chars(base_snapshot,
+                                                                          base_len)) {
+                    break;      /* 已经删到只剩基线了 */
+                }
+                lv_textarea_set_cursor_pos(ta, (uint32_t)base_len);
+                lv_textarea_delete_char(ta);
+                cur = lv_textarea_get_text(ta);
+            }
         }
     }
 
+    /* 2. 追加新文本 */
     lv_textarea_add_text(ta, text);
-    if (written != NULL) {
-        *written = strlen(text);
-    }
 }
 
 /* ------------------------------------------------------------------ 异步唤醒 */
@@ -290,21 +324,18 @@ static void voice_commit(lv_pinyin_ime_ctx_t *ctx)
         return;
     }
 
-    const lv_pinyin_ime_voice_cfg_t *cfg = lv_pinyin_ime_voice_get_config(v);
-    if (cfg != NULL && !cfg->append_result) {
-        /* "替换"模式：最终结果直接把预览撤掉重写，观感上就是一次落字。 */
-        voice_write_text(ctx->ta, text, &ctx->voice_preview_len);
-    } else {
-        /*
-         * "追加"模式：先把预览撤掉（否则中间结果会留在框里），再写最终文本。
-         * 撤预览时不算作"本次写入"，所以 written 归零。
-         */
-        size_t dummy = ctx->voice_preview_len;
-        voice_write_text(ctx->ta, "", &dummy);
-        voice_write_text(ctx->ta, text, &ctx->voice_preview_len);
-        /* 追加模式下最终文本不再是"预览"，但用同一段长度记账仍然成立：
-         * 下一次会话的第一次预览会先撤掉它 —— 这正是我们要的（一次识别 = 一段文本）。 */
-    }
+    /*
+     * 最终文本 = 撤掉本次预览 + 写入最终结果。
+     *
+     * 不论"追加"还是"替换"模式，这里都是同一个动作：把这段预览换成最终文本。
+     * 两者的区别只在于**预览期间**怎么显示（见 ime_ui_voice_sync），到落盘这一刻
+     * 没有区别 —— 早期版本在这里给两种模式写了两套分支，反而绕。
+     */
+    voice_write_text(ctx->ta, text, ctx->voice_preview_chars, ctx->voice_base);
+
+    /* 落盘之后这段不再是预览：清掉记账，下一次会话会重新拍快照。 */
+    ctx->voice_preview_chars = 0;
+    ctx->voice_base[0] = '\0';
 
     lv_obj_send_event(ctx->obj, lv_pinyin_ime_event_voice_result(), NULL);
 }
@@ -385,7 +416,10 @@ void ime_ui_voice_detach(void *ctx_arg)
     }
     ctx->voice_status = NULL;
     ctx->voice_bar = NULL;
-    ctx->voice_preview_len = 0;
+    ctx->voice_page_status = NULL;
+    ctx->voice_preview_chars = 0;
+    ctx->voice_base[0] = '\0';
+    ctx->voice_shown[0] = '\0';
 }
 
 void ime_ui_voice_sync(void *ctx_arg)
@@ -398,20 +432,44 @@ void ime_ui_voice_sync(void *ctx_arg)
     voice_status_label(ctx);
     voice_bar_update(ctx);
 
+    /*
+     * 语音页自带一行状态文字（那一页里候选栏是隐藏的，状态就靠它显示）。
+     * 控件由 kb.c 的 voice_page_build() 建，非空即"当前在语音页"。
+     */
+    if (ctx->voice_page_status != NULL) {
+        lv_label_set_text(ctx->voice_page_status, lv_pinyin_ime_voice_state_text(ctx->voice));
+    }
+
     const lv_pinyin_ime_voice_state_t st = lv_pinyin_ime_voice_state(ctx->voice);
 
-    /* 实时预览：识别中把中间结果写进输入框。 */
+    /*
+     * 实时预览：把当前识别到的文本写进输入框。
+     *
+     * ★ 这里**不看 status**，只要还在识别就写 —— 服务端开 wpgs 后每一片结果
+     *   （status=0/1）都带着当前整句，收到就该显示，这才有"边说边出字"。
+     *   只在 FINISHING 之后停止刷新（收尾由 voice_commit 一次性落盘）。
+     *
+     * 只在文本真的变了时才动控件：轮询是 100 ms 一次，而服务端几百毫秒才回一片，
+     * 不去重的话每秒会重写 10 次输入框（光标跳动、白重画）。
+     */
     const lv_pinyin_ime_voice_cfg_t *cfg = lv_pinyin_ime_voice_get_config(ctx->voice);
     const bool live = (cfg == NULL) || cfg->live_preview;
-    if (live && st == LV_PINYIN_IME_VOICE_LISTENING && ctx->ta != NULL) {
+    const bool busy = (st == LV_PINYIN_IME_VOICE_CONNECTING) ||
+                      (st == LV_PINYIN_IME_VOICE_LISTENING);
+    if (live && busy && ctx->ta != NULL) {
         const char *text = lv_pinyin_ime_voice_text(ctx->voice);
-        if (text != NULL && text[0] != '\0') {
-            size_t len = ctx->voice_preview_len;
-            /* 先撤预览再写新的：把上一次的长度复用成"要撤掉多少"。 */
-            char copy[IME_VOICE_TRANSCRIPT_MAX];
-            snprintf(copy, sizeof(copy), "%s", text);
-            voice_write_text(ctx->ta, "", &len);
-            voice_write_text(ctx->ta, copy, &ctx->voice_preview_len);
+        if (text != NULL && text[0] != '\0' && strcmp(text, ctx->voice_shown) != 0) {
+            /* 第一次写之前先拍快照：记下"预览之前"输入框长什么样，
+             * 之后每次刷新都靠它确认自己没有误删用户的内容。 */
+            if (ctx->voice_base[0] == '\0') {
+                const char *cur = lv_textarea_get_text(ctx->ta);
+                snprintf(ctx->voice_base, sizeof(ctx->voice_base), "%s",
+                         (cur != NULL) ? cur : "");
+            }
+            voice_write_text(ctx->ta, text, ctx->voice_preview_chars, ctx->voice_base);
+            ctx->voice_preview_chars = utf8_count_chars(text, strlen(text));
+            snprintf(ctx->voice_shown, sizeof(ctx->voice_shown), "%s", text);
+            ctx->voice_preview_updates++;
         }
     }
 }
@@ -526,7 +584,10 @@ void lv_pinyin_ime_voice_key_pressed(lv_obj_t *ime)
     }
 
     /* 空闲：开始一次新会话，先复位上一轮的记账。 */
-    ctx->voice_preview_len = 0;
+    ctx->voice_preview_chars = 0;
+    ctx->voice_base[0] = '\0';          /* 快照在第一次预览时重新拍 */
+    ctx->voice_shown[0] = '\0';         /* 去重用的"上次写的文本" */
+    ctx->voice_preview_updates = 0;
     ctx->voice_committed = false;
     ctx->voice_done_tick = 0;
     ctx->voice_status_shown = false;    /* 让 voice_status_update 重新接管候选栏 */

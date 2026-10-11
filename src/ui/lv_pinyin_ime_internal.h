@@ -46,6 +46,23 @@ extern "C" {
 /** Candidates drawn at once in the candidate bar (one page). */
 #define IME_UI_CAND_MAX 12
 
+/**
+ * 语音预览快照缓冲的长度（"这段预览之前输入框长什么样"）。
+ *
+ * 只用来做前缀比对，不需要装下整段用户输入：输入框内容比它长时，比对退化成
+ * "前 320 字节是否一致"，够用且省内存（这段在 ctx 里，ctx 是堆上的）。
+ */
+#define IME_VOICE_BASE_MAX 320
+
+/**
+ * "上一次写进输入框的文本"缓冲的长度，用于预览去重。
+ *
+ * 故意用 UI 自己的常量而不是语音协议层的 IME_VOICE_TRANSCRIPT_MAX：后者定义在
+ * src/voice/ime_voice_proto.h，而那个头只在 CONFIG_LV_PINYIN_IME_VOICE_ENABLE=y 时
+ * 才被包含进来 —— 拿它做数组维度会让"语音关"的配置编不过（踩过）。
+ */
+#define IME_VOICE_PREVIEW_MAX 640
+
 /** Pinyin chips drawn at once in the 9-key pinyin row. */
 #define IME_UI_T9_PINYIN_MAX 8
 
@@ -153,6 +170,12 @@ typedef struct {
     ime_mode_t mode;
     ime_lang_t lang;
     lv_pinyin_ime_panel_t panel;
+    /*
+     * 语音页**自己搭**的控件（见 kb.c 的 voice_page_build）：状态文字 + 圆形麦克风键。
+     * 每次 rebuild 都会重建，所以它们非空就等于"当前在语音页"。
+     */
+    lv_obj_t *voice_page_status;
+    lv_obj_t *voice_page_mic;
     bool panel_alt;        /**< P1 is showing the "other symbols" batch */
     bool t9_row_visible;   /**< 选拼音 toggle */
 
@@ -200,7 +223,27 @@ typedef struct {
                                   *   UI 私有头把语音的类型也拖进来） */
     lv_obj_t *voice_status;      /**< 候选栏里的状态文案（聆听中 / 识别中 / 错误） */
     lv_obj_t *voice_bar;         /**< 控件上沿的时长浮窗（和拼音浮窗同样式） */
-    size_t    voice_preview_len; /**< 已经写进输入框的语音文本字节数 */
+    /* voice_page_status 在结构体前面已经声明过了（语音页那一行状态文字）。 */
+    /**
+     * 已经写进输入框的预览长度。
+     *
+     * ★ 单位是**字符**，不是字节：LVGL 的 lv_textarea_delete_char() 删的是**一个
+     *   UTF-8 字符**（看它的实现：`lv_text_cut(label_txt, pos - 1, 1)`），而一个
+     *   汉字是 3 字节。拿字节数去删会多删两倍的字 —— 中文下每次实时刷新都会啃掉
+     *   一截已经上屏的文字，表现为"看着像没有实时上屏 / 越刷越短"。
+     */
+    uint32_t  voice_preview_chars;
+    /**
+     * 本次预览开始**之前**输入框的内容（快照）。
+     *
+     * 用来确认"那段预览还在原位"：用户中途手改了输入框、或输入框里本来就有内容时，
+     * 快照对不上就只追加、不删 —— 绝不误删用户自己打的内容。
+     */
+    char      voice_base[IME_VOICE_BASE_MAX];
+    /** 上一次写进输入框的文本，用来去重（100 ms 轮询 vs 服务端几百毫秒回一片）。 */
+    char      voice_shown[IME_VOICE_PREVIEW_MAX];
+    /** 本次会话刷新了几次预览（诊断"看着像没有实时上屏"用）。 */
+    uint32_t  voice_preview_updates;
     bool      voice_status_shown;/**< 候选行是否正被语音状态占用 */
     bool      voice_committed;   /**< 本次会话的结果已经上屏 */
     uint32_t  voice_done_tick;   /**< 进入 DONE/ERROR 的时刻，用于停留计时 */
