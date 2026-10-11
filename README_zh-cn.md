@@ -38,6 +38,23 @@
 
 如果你只想编译、烧录并运行示例，请从 [docs/usage.md](docs/usage.md) 开始。
 
+## 语音输入
+
+键盘上多一个语音键，按一下（或按住说话）就能把说的话变成文字进输入框；识别在云端做，
+用的是讯飞的[语音听写（流式版）WebAPI](https://www.xfyun.cn/doc/asr/voicedictation/API.html)。
+用 `CONFIG_LV_PINYIN_IME_VOICE_ENABLE` 打开，密钥在 menuconfig 的
+`LVGL Pinyin IME → Voice input` 里填。
+
+组件**刻意不碰网络、也不碰 I2S**：应用提供四个回调（`ws_open` / `ws_send_text` /
+`ws_close` / `audio_read`），所以不管用哪家云、哪个 WebSocket 库、哪款音频 codec，
+组件的依赖表始终只有 `lvgl` + `libgooglepinyin`。组件负责的是协议本身：HMAC-SHA256
+请求签名、40 ms / 1280 字节的音频分帧、返回结果解析、动态修正拼接、会话状态机。
+
+这样切分还有个好处：协议层能在 PC 上测完 —— 签名、分帧、解析整条链都拿讯飞文档里的
+样例逐字节校验，不需要网络也不需要板子（136 条断言，`test_apps/host_voice_test`）。
+
+接入步骤见 [docs/voice.md](docs/voice.md)。
+
 ## 状态
 
 | 阶段 | 内容 | 状态 |
@@ -50,14 +67,26 @@
 | S4 | 9 键：T9 缓冲、字典树、哈希表 | **完成** |
 | S5 | 双拼、模糊音、联想、用户词典 | 待做 |
 | S6 | 主机单测、文档、三目标回归 | 进行中 |
+| S7 | 语音输入（讯飞流式听写） | **完成** |
 
-目前有两条验证路径可用，都不需要硬件：
+目前有三条验证路径可用，都不需要硬件：
 
 ```powershell
 # 引擎、T9、字典树与哈希表的主机单测（64 条断言）
 cmake -S test_apps/host_core_test -B build/host_core_test -G Ninja
 cmake --build build/host_core_test
 .\build\host_core_test\host_core_test.exe data/dict/dict_pinyin.dat
+
+# 语音协议层的主机测试：签名、分帧、返回解析、动态修正（136 条断言，不联网）
+gcc -std=c11 -Wall -Wextra -Werror -Isrc `
+  test_apps/host_voice_test/main.c `
+  src/voice/ime_voice_proto.c src/voice/ime_voice_crypto.c `
+  -o build/host_voice_test/host_voice_test.exe
+.\build\host_voice_test\host_voice_test.exe
+
+# 用真交叉编译器做语法/类型检查，语音开与关两种配置都编一遍
+powershell -ExecutionPolicy Bypass -File tools\check_voice_build.ps1
+powershell -ExecutionPolicy Bypass -File tools\check_voice_example.ps1
 
 # 针对某个目标的组件编译检查
 & "D:\Espressif\EIM\v6.1\esp-idf\export.ps1"
@@ -71,16 +100,18 @@ idf.py set-target esp32s3 ; idf.py build
 ## 目录结构
 
 ```
-include/lvgl_pinyin_ime/  对外 API（LVGL 控件 + 不依赖 LVGL 的引擎门面）
+include/lvgl_pinyin_ime/  对外 API（LVGL 控件 + 不依赖 LVGL 的引擎门面 + 语音）
 src/ui/                    LVGL 控件
 src/core/                  会话状态机与引擎辅助模块
 src/data/                  词库、用户词典、字体装载
+src/voice/                 讯飞协议：签名、分帧、解析、状态机
 src/third_party/           内置的 libgooglepinyin（S1）
 partitions/                分区表（16 MB / 8 MB）
-docs/                      usage、keymap、architecture、integration、dict format
-examples/k26_k9_demo/      可构建示例：ST7789 + XPT2046 + IME 宿主
-tools/                     主机侧 Python 工具链（gen_dict、gen_t9_table）
+docs/                      usage、keymap、architecture、integration、voice、dict format
+examples/k26_k9_demo/      可构建示例：ST7789 + XPT2046 + IME 宿主（含语音接线）
+tools/                     主机侧 Python 工具链（gen_dict、gen_t9_table）与检查脚本
 test_apps/host_core_test/  不依赖 LVGL 模块的主机单测
+test_apps/host_voice_test/ 语音协议层的主机测试（不联网）
 test_apps/idf_component_build/  针对目标的编译检查，无需硬件
 ```
 

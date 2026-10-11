@@ -108,6 +108,7 @@ typedef enum {
     IME_KEY_LANG,       /**< toggle Chinese / English */
     IME_KEY_PANEL,      /**< open the panel named in `text` */
     IME_KEY_T9_PINYIN,  /**< 选拼音: show / hide the 9-key pinyin row */
+    IME_KEY_VOICE,      /**< 语音输入: start / stop a recognition session */
 } ime_key_action_t;
 
 /** One key of a keyboard row. */
@@ -187,6 +188,22 @@ typedef struct {
     bool      bksp_hold;      /**< long press reached: hint shown, gesture armed */
     bool      bksp_cleared;   /**< this hold already cleared the text area once */
     bool      bksp_consumed;  /**< a repeat ran: swallow the synthetic CLICKED */
+
+    /*
+     * 语音输入（2026-11）。lv_pinyin_ime_voice_attach() 才会建会话；没接时 voice
+     * 为 NULL，键盘上的语音键点了只打一条警告。
+     *
+     * 线程约定：下面的字段只允许在 LVGL 线程里读写；组件任务那边只发
+     * lv_async_call（见 src/voice/ime_voice_ui.c 开头的说明）。
+     */
+    void *voice;                 /**< lv_pinyin_ime_voice_t*（这里用 void* 免得
+                                  *   UI 私有头把语音的类型也拖进来） */
+    lv_obj_t *voice_status;      /**< 候选栏里的状态文案（聆听中 / 识别中 / 错误） */
+    lv_obj_t *voice_bar;         /**< 控件上沿的时长浮窗（和拼音浮窗同样式） */
+    size_t    voice_preview_len; /**< 已经写进输入框的语音文本字节数 */
+    bool      voice_status_shown;/**< 候选行是否正被语音状态占用 */
+    bool      voice_committed;   /**< 本次会话的结果已经上屏 */
+    uint32_t  voice_done_tick;   /**< 进入 DONE/ERROR 的时刻，用于停留计时 */
 } lv_pinyin_ime_ctx_t;
 
 /** State pointer of a root object, or NULL. */
@@ -262,6 +279,19 @@ void ime_ui_refresh_all(lv_pinyin_ime_ctx_t *ctx);
 
 /** Dispatch one key press. */
 void ime_ui_handle_key(lv_pinyin_ime_ctx_t *ctx, const ime_key_t *key);
+
+/* ---------------------------------------------------------------- 语音输入 */
+
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+/*
+ * 语音与控件之间的那几个入口在 src/voice/ime_voice_ui.h（单独的粘合头）。
+ *
+ * ★ 为什么不在这里重复声明一遍：两个头对同一个函数写出不同形参类型
+ *   （那边为了不依赖本模块的类型写成 void*）会构成冲突声明，在 -Werror 下直接
+ *   编译失败。让唯一的声明留在粘合头里，两边都 include 它。
+ */
+#include "voice/ime_voice_ui.h"
+#endif
 
 /* ------------------------------------------------------- backspace behaviour */
 

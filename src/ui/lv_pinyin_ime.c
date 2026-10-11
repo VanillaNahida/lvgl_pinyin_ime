@@ -67,6 +67,14 @@ void ime_root_delete_cb(lv_event_t *e)
     if (ctx == NULL) {
         return;
     }
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+    /*
+     * ★ 语音必须先摘掉：会话的任务还在跑的时候释放 ctx，它的状态回调就会拿着
+     *   已经失效的控件指针去 lv_async_call（悬垂指针，真机上会崩）。
+     *   ime_ui_voice_detach() 会停任务、取消挂起的 async，之后才轮到下面摘 dismiss。
+     */
+    ime_ui_voice_detach(ctx);
+#endif
     /*
      * ★ 必须在这里把"点空白收起"的回调摘掉：它挂在**屏幕 / 顶层 layer** 上，
      *   那两个比键盘活得久 —— 不摘的话键盘销毁后它们还留着，一旦再被点到就会用
@@ -270,6 +278,15 @@ lv_obj_t *lv_pinyin_ime_create(lv_obj_t *parent)
     ime_ui_rebuild_keyboard(ctx);
     ime_ui_apply_sizes(ctx);     /* fit 模式：把行高按目标总高分摊到每一行 */
     ime_ui_refresh_all(ctx);
+
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+    /*
+     * 语音：建会话并挂到控件上。没有提供 host 回调时 create() 仍然成功（只是
+     * 语音键点了会提示"未配置"），这样"先接键盘、后接网络"的接入顺序是可行的。
+     * 会话的 host 由应用通过 lv_pinyin_ime_voice_set_config() 补上。
+     */
+    (void)ime_ui_voice_attach(ctx->obj);
+#endif
     return ctx->obj;
 }
 
@@ -885,6 +902,16 @@ void ime_ui_handle_key(lv_pinyin_ime_ctx_t *ctx, const ime_key_t *key)
         /* 可见行数变了：fit 模式下重新分摊行高，整块仍占目标高度 */
         ime_ui_apply_sizes(ctx);
         break;
+
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+    case IME_KEY_VOICE:
+        /*
+         * 空操作：语音键的开关走 PRESSED / RELEASED / LONG_PRESSED 三个回调
+         * （见 lv_pinyin_ime_kb.c 的 voice_pressed_cb）。这里保持显式分支，
+         * 免得将来有人以为漏了处理而在这里补一句 —— 那会和按键回调重复触发。
+         */
+        break;
+#endif
 
     case IME_KEY_NONE:
     default:

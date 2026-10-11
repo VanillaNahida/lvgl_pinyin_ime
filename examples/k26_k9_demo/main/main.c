@@ -41,6 +41,21 @@
 #include "touch_cal.h"
 #include "touch_xpt2046.h"
 
+/*
+ * 语音输入（可选）。这三对头文件只在 CONFIG_LV_PINYIN_IME_VOICE_ENABLE=y 时才有
+ * 对应的源文件参与编译，所以整个包含块也要跟着条件化 —— 否则默认配置下会找不到
+ * 符号。
+ *
+ * 分工见 docs/voice.md：组件做讯飞协议，这里提供网线与麦克风。
+ */
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+#include "lvgl_pinyin_ime/lv_pinyin_ime_voice.h"
+
+#include "mic_i2s.h"
+#include "net_wifi.h"
+#include "net_ws.h"
+#endif
+
 static const char *TAG = "k26_k9_demo";
 
 /* ---------------------------------------------------------------- hardware */
@@ -326,6 +341,54 @@ static void nvs_init(void)
     ESP_ERROR_CHECK(err);
 }
 
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+/* ---------------------------------------------------------------- 语音输入 */
+
+/*
+ * 把三块拼起来：组件的会话 ← host 回调（net_ws）+ 麦克风（mic_i2s）。
+ *
+ * 顺序上只有一条硬要求：**先 lv_pinyin_ime_voice_attach()，再 set_config()** ——
+ * 会话是 attach 时建的。网络与麦克风的初始化可以在它之前或之后，因为组件要等到
+ * 用户按下语音键、真的开始一次识别时才会碰它们。
+ */
+static void voice_init(lv_obj_t *ime)
+{
+    /* 1. 网络：连 Wi-Fi（拿不到 IP 也继续，界面会提示"语音连接失败"）+ 启动对时 */
+    if (demo_wifi_connect(15000) == ESP_OK) {
+        demo_sntp_start();
+    }
+
+    /* 2. WebSocket 客户端（只建，不连；地址每次会话由组件签好交进来） */
+    if (demo_ws_init(ime) != ESP_OK) {
+        ESP_LOGE(TAG, "websocket init failed; the voice key will report an error");
+        return;
+    }
+
+    /* 3. 麦克风。采样率必须与 menuconfig 里的 Voice input → Sample rate 一致，
+     *    不一致会变调、识别率明显下降。 */
+    if (mic_i2s_init(CONFIG_LV_PINYIN_IME_VOICE_SAMPLE_RATE) != ESP_OK) {
+        ESP_LOGW(TAG, "microphone init failed; see the TODOs in mic_i2s.c");
+        /* 不 return：网络已经好了，用户至少能从状态条看到"麦克风读取失败"，
+         * 比整个语音功能静默失效要好排查。 */
+    }
+    demo_ws_set_audio(mic_i2s_read, NULL);
+
+    /* 4. 把 host 交给键盘上的会话 */
+    lv_pinyin_ime_voice_t *v = lv_pinyin_ime_voice_of(ime);
+    if (v == NULL) {
+        ESP_LOGE(TAG, "no voice session on the keyboard "
+                      "(is CONFIG_LV_PINYIN_IME_VOICE_ENABLE on?)");
+        return;
+    }
+    lv_pinyin_ime_voice_cfg_t cfg = lv_pinyin_ime_voice_cfg_default();
+    cfg.host = demo_ws_host();
+    lv_pinyin_ime_voice_set_config(v, &cfg);
+
+    ESP_LOGI(TAG, "voice input ready: endpoint=%s language=%s rate=%d",
+             cfg.endpoint, cfg.language, cfg.sample_rate);
+}
+#endif /* CONFIG_LV_PINYIN_IME_VOICE_ENABLE */
+
 void app_main(void)
 {
     lcd_backlight_init();
@@ -377,12 +440,20 @@ void app_main(void)
         lv_obj_add_event_cb(ime, ime_ready_cb, lv_pinyin_ime_event_ready(), NULL);
         /* Bring-up aid: prints the geometry of the widget tree to the console. */
         lv_pinyin_ime_dump(ime);
+
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+        voice_init(ime);
+#endif
     }
 
     console_init();
 
     ESP_LOGI(TAG, "lvgl_pinyin_ime demo started, %dx%d ST7789 + XPT2046, mode=%d lang=%d",
-             LCD_H_RES, LCD_V_RES, (int)lv_pinyin_ime_get_mode(ime), (int)lv_pinyin_ime_get_lang(ime));
+             LCD_H_RES, LCD_V_RES, (int)lv_pinyin_ime_get_mode(ime),
+             (int)lv_pinyin_ime_get_lang(ime));
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+    ESP_LOGI(TAG, "voice input: %s", lv_pinyin_ime_voice_supported() ? "on" : "off");
+#endif
     console_print_help();
 
     while (1) {

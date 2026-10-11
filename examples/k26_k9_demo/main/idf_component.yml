@@ -1,3 +1,16 @@
 dependencies:
   idf: ">=5.3"
   lvgl/lvgl: "^9.5"
+  # Voice input needs a WebSocket client. esp_websocket_client is NOT part of the
+  # ESP-IDF core (checked: IDF 6.1 has no components/esp_websocket_client and no
+  # websocket example under examples/protocols), it is a managed component.
+  #
+  # It is declared HERE, in the application, and not in the IME component's own
+  # idf_component.yml — that is the whole point of the split described in
+  # docs/voice.md §1: lvgl_pinyin_ime stays free of any network stack, and the
+  # application decides how to talk to the cloud. An application that already has
+  # its own socket layer can use it instead and simply not add this dependency.
+  #
+  # The conditional form means it is only pulled in when voice input is enabled,
+  # so the default (voice off) build downloads nothing extra.
+  espressif/esp_websocket_client: "^1.5"

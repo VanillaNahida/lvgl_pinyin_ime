@@ -25,11 +25,34 @@ Chinese pinyin input method (IME) component for **LVGL 9.5** on **ESP-IDF 6.1**.
 - Keyboards: 26-key full keyboard + 9-key (T9), plus a shared digit / symbol panel set
 - Input: full pinyin, double pinyin (six schemes, Xiaohe by default), phrases, whole sentences
 - Features: candidate paging, syllable separator `'`, association, user frequency learning, fuzzy pinyin (off by default)
+- Voice input (optional): iFlytek streaming dictation — the component runs the protocol, your application supplies the socket and the microphone
 - Targets: ESP32-S3-N16R8 (primary), ESP32-S31, ESP32-P4
 - Reference board: ST7789 (SPI, 320 x 240 landscape) + XPT2046 touch
 
 Start with [docs/usage.md](docs/usage.md) if you just want to build, flash and
 run the example.
+
+## Voice input
+
+A voice key on the keyboard drives a streaming speech-to-text session against the
+[iFlytek dictation WebAPI](https://www.xfyun.cn/doc/asr/voicedictation/API.html).
+Enable it with `CONFIG_LV_PINYIN_IME_VOICE_ENABLE` and fill in the credentials
+under `LVGL Pinyin IME → Voice input` in menuconfig.
+
+The component deliberately opens **no socket and no I2S**: the application
+provides four callbacks (`ws_open` / `ws_send_text` / `ws_close` / `audio_read`),
+so the component's dependency list stays at `lvgl` + `libgooglepinyin` no matter
+which cloud service, WebSocket library or audio codec you use. What the component
+owns is the protocol — HMAC-SHA256 request signing, the 40 ms / 1280 byte audio
+framing, reply parsing, dynamic-correction reassembly and the session state
+machine.
+
+That split is also what makes the protocol testable on a PC: the whole
+signing / framing / parsing chain is verified against the samples printed in
+iFlytek's own documentation, with no network and no hardware involved (136
+assertions, `test_apps/host_voice_test`).
+
+See [docs/voice.md](docs/voice.md) for the integration guide.
 
 ## Status
 
@@ -43,14 +66,27 @@ run the example.
 | S4 | 9-key: T9 buffer, trie, hash | **done** |
 | S5 | Double pinyin, fuzzy, association, user dictionary | pending |
 | S6 | Host unit tests, docs, three-target regression | in progress |
+| S7 | Voice input (iFlytek streaming dictation) | **done** |
 
-Two verification paths work today, neither needs hardware:
+Three verification paths work today, none of them needs hardware:
 
 ```powershell
 # Engine, T9, trie and hash unit tests on the host (64 assertions)
 cmake -S test_apps/host_core_test -B build/host_core_test -G Ninja
 cmake --build build/host_core_test
 .\build\host_core_test\host_core_test.exe data/dict/dict_pinyin.dat
+
+# Voice protocol tests on the host: signing, framing, reply parsing,
+# dynamic correction (136 assertions; no network, no board)
+gcc -std=c11 -Wall -Wextra -Werror -Isrc `
+  test_apps/host_voice_test/main.c `
+  src/voice/ime_voice_proto.c src/voice/ime_voice_crypto.c `
+  -o build/host_voice_test/host_voice_test.exe
+.\build\host_voice_test\host_voice_test.exe
+
+# Compile checks with the real cross compiler, both voice configurations
+powershell -ExecutionPolicy Bypass -File tools/check_voice_build.ps1
+powershell -ExecutionPolicy Bypass -File tools/check_voice_example.ps1
 
 # Component compile check for a target
 & "D:\Espressif\EIM\v6.1\esp-idf\export.ps1"
@@ -64,16 +100,18 @@ downloaded: `python tools/gen_dict.py` (see [docs/usage.md](docs/usage.md)).
 ## Layout
 
 ```
-include/lvgl_pinyin_ime/   public API (LVGL widget + LVGL free engine facade)
+include/lvgl_pinyin_ime/   public API (LVGL widget + LVGL free engine facade + voice)
 src/ui/                    LVGL widgets
 src/core/                  session state machine and engine helpers
 src/data/                  dictionary, user dictionary, font loading
+src/voice/                 iFlytek protocol: signing, framing, parsing, state machine
 src/third_party/           vendored libgooglepinyin (S1)
 partitions/                partition tables (16 MB / 8 MB)
-docs/                      usage, keymap, architecture, integration, dict format
-examples/k26_k9_demo/      buildable example: ST7789 + XPT2046 + IME host
-tools/                     host side Python toolchain (gen_dict, gen_t9_table)
+docs/                      usage, keymap, architecture, integration, voice, dict format
+examples/k26_k9_demo/      buildable example: ST7789 + XPT2046 + IME host (+ voice wiring)
+tools/                     host side Python toolchain (gen_dict, gen_t9_table) + checks
 test_apps/host_core_test/  host unit tests for the LVGL-free modules
+test_apps/host_voice_test/ host tests for the voice protocol layer (no network)
 test_apps/idf_component_build/  compile check for a target, no hardware needed
 ```
 

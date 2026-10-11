@@ -380,3 +380,60 @@ idf.py set-target esp32p4       ; idf.py build
 首次构建前若尚未创建 IDF 6.1 的 Python 环境，需先执行一次
 `& "D:\Espressif\EIM\v6.1\esp-idf\install.ps1"`（安装器末尾会提示
 `Invalid feature specifier: -IdfTarget`，该报错不影响 Python 环境创建）。
+
+### 8.1 语音输入的验证（不需要硬件）
+
+语音模块的两种配置都要编：默认配置是"语音关"，此时 `src/voice/` 不参与编译，
+`src/ui/` 里所有 `#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE` 走另一条分支 —— 而那条
+分支才是绝大多数接入方实际编到的代码。
+
+```powershell
+# 1. 协议层（PC 上跑，不需要网络与板子，136 条断言）
+gcc -std=c11 -Wall -Wextra -Werror -Isrc `
+  test_apps/host_voice_test/main.c `
+  src/voice/ime_voice_proto.c src/voice/ime_voice_crypto.c `
+  -o build/host_voice_test/host_voice_test.exe
+.\build\host_voice_test\host_voice_test.exe
+
+# 2. 组件：语音开 / 关两种配置的语法与类型检查
+#    （复用 examples/k26_k9_demo/build/compile_commands.json 里的编译参数，
+#      同一个交叉编译器、同一套 include，只做 -fsyntax-only，几秒钟出结果）
+powershell -ExecutionPolicy Bypass -File tools\check_voice_build.ps1
+
+# 3. 示例工程的语音源文件（net_wifi.c / net_ws.c / mic_i2s.c）
+powershell -ExecutionPolicy Bypass -File tools\check_voice_example.ps1
+```
+
+两个脚本都**不重新配置 cmake**，所以不需要 `idf.py reconfigure`，也就绕开了
+"改 sdkconfig 要重跑配置"那一步。第 3 个脚本用的是真 IDF 头 + 一个
+`esp_websocket_client` 桩头（见 `test_apps/idf_component_build/stub_include/` 的说明），
+覆盖到除"桩与真头差异"之外的全部 API 用法。
+
+真机联调（需要麦克风与 Wi-Fi）见 [voice.md](./voice.md) 的第 2、10 节。
+
+### 8.2 ⚠ `idf.py fullclean` 不会清掉 `build/config/sdkconfig.h`
+
+踩过一次，症状很迷惑：把 `sdkconfig` 里的
+`CONFIG_LV_PINYIN_IME_VOICE_ENABLE` 改回关闭、跑 `idf.py build`，结果
+`main/mic_i2s.c` 仍然被编译并报 `driver/i2s_pdm.h: No such file or directory` ——
+配置里明明写着"没开"。
+
+原因：
+- `fullclean` 清的是目标文件与生成物，**`build/config/` 下那份生成出来的
+  `sdkconfig.h` 会留下**；
+- 它比 `sdkconfig` 新（是上一次配置时生成的），所以 CMake 的"输入比输出新"判断
+  认为不需要重新生成，于是编译器继续看到**旧的** `CONFIG_` 宏。
+
+处理：改完 `sdkconfig` 若行为不符合预期，直接删掉整个 `build/` 再构建：
+
+```powershell
+Remove-Item -Recurse -Force build
+idf.py build
+```
+
+同理，`test_apps/idf_component_build` 那种"只做编译检查"的工程也会受同一问题影响。
+判断当前真实配置最快的办法是直接看生成物：
+
+```powershell
+Select-String -Path build\config\sdkconfig.h -Pattern 'LV_PINYIN_IME_VOICE'
+```

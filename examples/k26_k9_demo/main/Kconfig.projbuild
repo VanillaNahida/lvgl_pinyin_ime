@@ -1,0 +1,50 @@
+menu "k26_k9_demo"
+
+    # `visible if` and not `depends on`: this file belongs to the demo's main
+    # component, and a symbol from another component (LV_PINYIN_IME_VOICE_ENABLE)
+    # is not reliably resolvable as a dependency at menu-parse time. `visible if`
+    # only hides the entries, which is all we need — and if the symbol cannot be
+    # resolved the worst case is that the entries stay visible.
+    menu "Voice input example wiring"
+        visible if LV_PINYIN_IME_VOICE_ENABLE
+
+        config EXAMPLE_WIFI_SSID
+            string "Wi-Fi SSID"
+            default ""
+            help
+                The access point the demo connects to. Speech recognition runs in
+                the cloud, so without a network the voice key reports
+                "语音连接失败".
+
+                Kept here rather than written into main.c so that a board's
+                credentials never land in a source file that gets committed.
+
+        config EXAMPLE_WIFI_PASSWORD
+            string "Wi-Fi password"
+            default ""
+
+        config EXAMPLE_MIC_I2S_PORT
+            int "I2S port"
+            range 0 1
+            default 0
+            help
+                Which I2S controller the microphone is on. ESP32-S3 has 0 and 1.
+
+        config EXAMPLE_MIC_PIN_CLK
+            int "Microphone clock pin (PDM CLK)"
+            default 41
+            help
+                See the TODO list at the top of main/mic_i2s.c.
+
+                If your board uses an I2S codec (ES8311 / ES7210 and friends)
+                instead of a bare PDM MEMS microphone, replace the PDM
+                configuration in mic_i2s.c with i2s_std and configure the codec.
+                These two pins are then BCLK and DIN.
+
+        config EXAMPLE_MIC_PIN_DIN
+            int "Microphone data pin (PDM DIN)"
+            default 42
+
+    endmenu
+
+endmenu

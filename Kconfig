@@ -141,4 +141,194 @@ menu "LVGL Pinyin IME"
         depends on LV_PINYIN_IME_EXT_DICT_ENABLE
         default "/sdcard/ime_ext.bin"
 
+    menu "Voice input (iFlytek IAT)"
+
+        config LV_PINYIN_IME_VOICE_ENABLE
+            bool "Enable voice input"
+            default n
+            help
+                Adds a voice key to the keyboard and drives a streaming speech
+                recognition session (iFlytek "语音听写（流式版）").
+
+                The component itself does NOT open any socket and does NOT touch
+                I2S: the application supplies both through
+                lv_pinyin_ime_voice_host_t (ws_open / ws_send_text / ws_close /
+                audio_read), and lv_pinyin_ime_voice_attach() wires the
+                keyboard's voice key to it. See docs/voice.md.
+
+                Turning this ON costs nothing for applications that never call
+                the voice API: only this flag decides whether src/voice/* is
+                compiled in.
+
+        config LV_PINYIN_IME_VOICE_APPID
+            string "AppID"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default ""
+            help
+                The AppID from the iFlytek console (console.xfyun.cn), shown on
+                the application's service page for 语音听写（流式版）.
+
+        config LV_PINYIN_IME_VOICE_APIKEY
+            string "APIKey"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default ""
+            help
+                The 32 character APIKey. Together with APISecret it signs the
+                WebSocket handshake (HMAC-SHA256); the signature is rejected if
+                the device clock is off by more than 300 seconds, so the
+                application must run SNTP before the first recognition.
+
+        config LV_PINYIN_IME_VOICE_APISECRET
+            string "APISecret"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default ""
+            help
+                The 32 character APISecret.
+
+                SECURITY: anything configured here is compiled into the firmware
+                and can be extracted from a device. That is fine for
+                development, but for a product put the credentials in NVS or
+                fetch them from your own server and set them at runtime with
+                lv_pinyin_ime_voice_set_config(), leaving these three empty.
+
+        config LV_PINYIN_IME_VOICE_ENDPOINT
+            string "Endpoint URL"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default "wss://iat-api.xfyun.cn/v2/iat"
+            help
+                Chinese/English (recommended): wss://iat-api.xfyun.cn/v2/iat
+                Also valid:                   wss://ws-api.xfyun.cn/v2/iat
+                Minority languages:           wss://iat-niche-api.xfyun.cn/v2/iat
+
+                Do not replace the host name with an IP address: iFlytek rotates
+                its servers.
+
+        config LV_PINYIN_IME_VOICE_LANGUAGE
+            string "Language"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default "zh_cn"
+            help
+                zh_cn: Chinese (simple English is recognised too)
+                en_us: English
+                Other values must be enabled in the console and use the
+                iat-niche-api host.
+
+        config LV_PINYIN_IME_VOICE_DOMAIN
+            string "Domain"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default "iat"
+            help
+                iat: everyday speech (default)
+                xfime-mianqie: 23 Chinese dialects without switching
+                medical / gov-seat-assistant / seat-assistant / gov-ansys /
+                gov-nav / fin-nav / fin-ansys: need separate authorisation, and
+                the last six only accept 8 kHz audio.
+
+        config LV_PINYIN_IME_VOICE_ACCENT
+            string "Accent"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default "mandarin"
+            help
+                mandarin for standard Chinese; other dialects must be enabled in
+                the console and their parameter value copied from there.
+
+        config LV_PINYIN_IME_VOICE_SAMPLE_RATE
+            int "Sample rate (Hz)"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            range 8000 16000
+            default 16000
+            help
+                The API only accepts 8000 or 16000. 16 kHz is what the
+                documentation recommends and what the 40 ms / 1280 byte frame
+                size assumes; the microphone callback must deliver PCM at this
+                rate (16 bit, mono, little endian).
+
+        config LV_PINYIN_IME_VOICE_EOS_MS
+            int "End-of-speech silence (ms)"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            range 500 10000
+            default 2000
+            help
+                How long a silence makes the server consider the sentence
+                finished and send the final result. Smaller feels snappier but
+                cuts people off when they pause to think.
+
+        config LV_PINYIN_IME_VOICE_DWA
+            bool "Dynamic correction (dwa=wpgs)"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default y
+            help
+                Streams partial results and lets the server REPLACE text it
+                already sent ("明天" -> "明天天气"), which is what makes
+                dictation feel live. Chinese Mandarin only, and it cannot be
+                combined with vinfo.
+
+                With it off, every reply is an append of the whole sentence, so
+                text only becomes correct once the sentence ends.
+
+        config LV_PINYIN_IME_VOICE_PUNCTUATION
+            bool "Add punctuation (ptt=1)"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default y
+
+        config LV_PINYIN_IME_VOICE_LIVE_PREVIEW
+            bool "Show interim text while listening"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default y
+            help
+                Writes the text recognised so far into the bound text area,
+                replacing it on every update, and leaves only the final result
+                there. With it off the text area stays untouched until the
+                session ends.
+
+        choice LV_PINYIN_IME_VOICE_COMMIT_MODE
+            prompt "How the final result enters the text area"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default LV_PINYIN_IME_VOICE_COMMIT_APPEND
+
+            config LV_PINYIN_IME_VOICE_COMMIT_APPEND
+                bool "Append after the existing text"
+                help
+                    Keeps whatever the user typed or dictated earlier.
+
+            config LV_PINYIN_IME_VOICE_COMMIT_REPLACE
+                bool "Replace this session's preview"
+                help
+                    Drops the interim preview of this session and inserts the
+                    final text in its place, so the result looks like one clean
+                    insertion instead of a growing line.
+        endchoice
+
+        choice LV_PINYIN_IME_VOICE_TAP_MODE
+            prompt "Voice key behaviour"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default LV_PINYIN_IME_VOICE_TAP_BOTH
+
+            config LV_PINYIN_IME_VOICE_TAP_TOGGLE
+                bool "Tap to start, tap again to stop"
+                help
+                    Nothing to hold; the server also ends the session by itself
+                    after the end-of-speech silence.
+
+            config LV_PINYIN_IME_VOICE_TAP_PTT
+                bool "Hold to talk, release to stop"
+                help
+                    Push to talk. Precise control, but the finger stays on the
+                    key.
+
+            config LV_PINYIN_IME_VOICE_TAP_BOTH
+                bool "Both: tap toggles, long press is push-to-talk"
+                help
+                    A short tap starts and stops; holding the key talks until
+                    released. This is the default because it needs no decision
+                    from the user.
+        endchoice
+
+        config LV_PINYIN_IME_VOICE_KEY_K9
+            bool "Show the voice key on the 9-key keyboard"
+            depends on LV_PINYIN_IME_VOICE_ENABLE
+            default y
+
+    endmenu
+
 endmenu

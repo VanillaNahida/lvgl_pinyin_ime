@@ -28,3 +28,28 @@ CONFIG_LV_COLOR_DEPTH_16=y
 # font would ever load and the candidates would draw as boxes.
 CONFIG_LV_USE_FS_MEMFS=y
 CONFIG_LV_FS_MEMFS_LETTER=65
+
+# ---------------------------------------------------------------------------
+# Voice input (iFlytek IAT) - OFF by default.
+#
+# Deliberately not enabled here: turning it on pulls in Wi-Fi + TLS + an I2S
+# driver and requires an iFlytek account (AppID / APIKey / APISecret), so it must
+# be a conscious choice. To try it:
+#
+#   idf.py menuconfig
+#     -> LVGL Pinyin IME -> Voice input (iFlytek IAT)  -> Enable voice input
+#                                                        + the three credentials
+#     -> k26_k9_demo -> Voice input example wiring      -> Wi-Fi SSID/password
+#                                                          + microphone pins
+#
+# The credentials go into build/config/sdkconfig.h as C string literals, which the
+# ESP-IDF build includes everywhere, so they become
+# CONFIG_LV_PINYIN_IME_VOICE_APPID / _APIKEY / _APISECRET directly. (The
+# component's CMakeLists.txt deliberately does NOT pass them as extra compile
+# definitions: doing that as well caused "redefined" errors under -Werror.)
+#
+# Set below is only what has to match between the component and this example;
+# the pins and the Wi-Fi credentials live in menuconfig, not here, so a board's
+# secrets never end up in a committed file.
+# ---------------------------------------------------------------------------
+# CONFIG_LV_PINYIN_IME_VOICE_ENABLE is not set

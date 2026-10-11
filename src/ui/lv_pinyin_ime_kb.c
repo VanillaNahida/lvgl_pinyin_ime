@@ -10,6 +10,7 @@
  */
 
 #include "lv_pinyin_ime_internal.h"
+#include "mic_icon.h"   /* 语音键的位图麦克风（assets/mic.png 烘出来的，见 gen_mic_icon.py） */
 
 #include <ctype.h>
 #include <string.h>
@@ -63,13 +64,27 @@ static const ime_key_t s_k26_r3[] = {
 };
 
 /*
- * R4: ?123(2u) ⌨(2u) 空格(4u) 中/英(2u) ✓(2u)
+ * R4: ?123(2u) ⌨(2u) 空格 语音 中/英(1.5u) ✓(1.5u)
  *
  * The space bar sits between the keyboard switch and the language key, which
  * puts it under the thumbs and leaves the two mode keys in the outer corners -
- * the arrangement the reference layout uses. It is 4u wide so it lines up with
- * the letter columns above it.
+ * the arrangement the reference layout uses.
+ *
+ * The voice key (2026-11) costs the space bar one unit: the two corner keys
+ * give up half a unit each and the space bar one, so the row is still exactly
+ * 12 units and every column still lines up with the letter rows above. Without
+ * voice input enabled the row is the old 2u/2u/4u/2u/2u one.
  */
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+static const ime_key_t s_k26_r4[] = {
+    KWT("?123", NULL, IME_KEY_PANEL, 20),
+    KWT(LV_SYMBOL_KEYBOARD, NULL, IME_KEY_SWITCH_KB, 20),
+    KWT("空格", NULL, IME_KEY_SPACE, 30),
+    KWT(LV_SYMBOL_AUDIO, NULL, IME_KEY_VOICE, 20),
+    KWT("中", NULL, IME_KEY_LANG, 15),
+    KWT(LV_SYMBOL_OK, NULL, IME_KEY_CONFIRM, 15),
+};
+#else
 static const ime_key_t s_k26_r4[] = {
     KWT("?123", NULL, IME_KEY_PANEL, 20),
     KWT(LV_SYMBOL_KEYBOARD, NULL, IME_KEY_SWITCH_KB, 20),
@@ -77,6 +92,7 @@ static const ime_key_t s_k26_r4[] = {
     KWT("中", NULL, IME_KEY_LANG, 20),
     KWT(LV_SYMBOL_OK, NULL, IME_KEY_CONFIRM, 20),
 };
+#endif
 
 /* English mode: same geometry, the separator key is inert. */
 static const ime_key_t s_k26_en_r3[] = {
@@ -119,12 +135,21 @@ static const ime_key_t s_k9_r3[] = {
     KWT(LV_SYMBOL_OK, NULL, IME_KEY_CONFIRM, 24),
 };
 
-/* R4: 符/123 空格 中/英 ↵ */
+/* R4: 选拼音 语音 空格 */
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE && CONFIG_LV_PINYIN_IME_VOICE_KEY_K9
+static const ime_key_t s_k9_r4[] = {
+    KWT("选拼音", NULL, IME_KEY_T9_PINYIN, 24),
+    KWT(LV_SYMBOL_KEYBOARD, NULL, IME_KEY_SWITCH_KB, 24),
+    KWT(LV_SYMBOL_AUDIO, NULL, IME_KEY_VOICE, 24),
+    KWT("空格", NULL, IME_KEY_SPACE, 48),
+};
+#else
 static const ime_key_t s_k9_r4[] = {
     KWT("选拼音", NULL, IME_KEY_T9_PINYIN, 24),
     KWT(LV_SYMBOL_KEYBOARD, NULL, IME_KEY_SWITCH_KB, 24),
     KWT("空格", NULL, IME_KEY_SPACE, 72),
 };
+#endif
 
 /* ------------------------------------------------------- P1 digits + symbols */
 
@@ -302,6 +327,19 @@ static void key_click_cb(lv_event_t *e)
         return;
     }
     /*
+     * ★ 需求（2026-10）：⌨ 键**短按 = 开关语音输入**（原来短按是切 K26/K9 布局）。
+     *
+     *   - 语音**没接上**（组件没开语音、或宿主没 attach）时，整段跳过 →
+     *     行为与以前完全一样（切布局），这样开了语音开关也不会莫名其妙失去布局切换；
+     *   - 语音接了：短按 toggle 识别（开始/结束由 VOICE_TAP_MODE 决定），
+     *     布局切换改到**长按**（见 key_long_press_cb 的 IME_KEY_SWITCH_KB）。
+     */
+    if (key->action == IME_KEY_SWITCH_KB) {
+        /* （原样：CLICKED 交给 ime_ui_handle_key() 去切 K26/K9 布局。
+         *   2026-10 曾一度把这里改成"短按开语音"，方向错了 —— 语音要走**独立页面**，
+         *   不是抢这个键，已撤回。） */
+    }
+    /*
      * ★ LVGL sends CLICKED unconditionally on release, even after a long press
      *   (indev_proc_release only skips the *short* click). A hold on the
      *   backspace key has already deleted characters, so that trailing CLICKED
@@ -343,12 +381,74 @@ static void key_long_press_cb(lv_event_t *e)
         ime_ui_commit_pending(ctx);
         ime_ui_refresh_all(ctx);
         break;
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+    case IME_KEY_VOICE:
+        /*
+         * 长按 = "我说完了" -> 结束本次识别（不取消：已经识别的内容要留下）。
+         *
+         * ★ 只结束、不取消。早期版本这里调的是 cancel，结果是长按说一句话什么
+         *   都不会上屏 —— 取消的语义是"丢弃"（见 lv_pinyin_ime_voice.h），而用户
+         *   按下长按想表达的是"我说完了"。
+         *
+         * ★ 只在**已经开始**时才结束：长按发生在按下之后、松手之前，而按下的那一下
+         *   已经开了会话。这里只管收尾，重复调用 stop 是幂等的（会话不在跑就返回）。
+         */
+        if (lv_pinyin_ime_voice_of(ctx->obj) != NULL) {
+            lv_pinyin_ime_voice_key_released(ctx->obj);
+        }
+        break;
+#endif
     default:
         break;
     }
 }
 
 /* ------------------------------------------------- backspace: hold + gesture */
+
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+/*
+ * 语音键：按下开始、松手结束。
+ *
+ * ★ 不能像其它键那样靠 CLICKED：对讲模式（PTT）要的是"按住说话、松手结束"，
+ *   而 CLICKED 只在松手时才发一次，压不住"按下"这个时刻。而 TOGGLE 模式只需要
+ *   按下那一下（再按一次结束），所以用 PRESSED 统一入口、RELEASED 收尾：
+ *
+ *     按下  → 空闲则开始识别；正在识别则什么都不做（等松手决定）
+ *     松手  → TOGGLE：没变化（识别继续，等下一次按下才结束）
+ *             PTT   ：结束识别，结果上屏
+ *     长按  → 结束识别（三种模式一致，见 key_long_press_cb）
+ *
+ *   这样"短按切换"和"长按对讲"共用一条按下/松手路径，不会互相打架：TOGGLE 用户
+ *   按一下就走，手指抬起不会误结束；PTT 用户一直按着，松手才结束。
+ */
+static void voice_pressed_cb(lv_event_t *e)
+{
+    lv_pinyin_ime_ctx_t *ctx = lv_event_get_user_data(e);
+    if (ctx == NULL || ctx->obj == NULL) {
+        return;
+    }
+    lv_pinyin_ime_voice_key_pressed(ctx->obj);
+}
+
+static void voice_released_cb(lv_event_t *e)
+{
+    lv_pinyin_ime_ctx_t *ctx = lv_event_get_user_data(e);
+    if (ctx == NULL || ctx->obj == NULL) {
+        return;
+    }
+    lv_pinyin_ime_voice_key_released(ctx->obj);
+}
+
+/** 按键失去焦点（滑走、被别处抢走）：对讲模式下按"松手"处理，别把麦克风开着。 */
+static void voice_press_lost_cb(lv_event_t *e)
+{
+    lv_pinyin_ime_ctx_t *ctx = lv_event_get_user_data(e);
+    if (ctx == NULL || ctx->obj == NULL) {
+        return;
+    }
+    lv_pinyin_ime_voice_key_released(ctx->obj);
+}
+#endif
 
 static void bksp_pressed_cb(lv_event_t *e)
 {
@@ -501,11 +601,28 @@ void ime_ui_apply_keyboard(lv_pinyin_ime_ctx_t *ctx, const ime_keyboard_t *kb)
             lv_obj_set_flex_grow(btn, key_grow(key));
             lv_obj_set_user_data(btn, (void *)key);
 
-            lv_obj_t *label = lv_label_create(btn);
-            lv_label_set_text(label, key_label(ctx, key));
-            lv_label_set_recolor(label, true);
-            ime_style_apply_font(label, key_caption_font(key));
-            lv_obj_center(label);
+            /*
+             * 键面：语音键用**位图麦克风**（assets/mic.png → src/ui/mic_icon.c），
+             * 其余键照旧用文字 label。
+             *
+             * 为什么不用 LV_SYMBOL_AUDIO：那是 FontAwesome 的**喇叭**，表达的是
+             * "播放/音量"而不是"说话"，用户看着不对；而且它靠字体里刚好有那个
+             * 私用区字形，换了 UI 字体就会变成方框。位图与字体无关。
+             *
+             * 注：键面文字只在建键盘时写一次（见上面 lv_label_set_text 的唯一调用点），
+             * 没有"运行时改键面文字"的路径，所以这里换成 image 子对象是安全的。
+             */
+            if (key->action == IME_KEY_VOICE) {
+                lv_obj_t *icon = lv_image_create(btn);
+                lv_image_set_src(icon, &mic_icon);
+                lv_obj_center(icon);
+            } else {
+                lv_obj_t *label = lv_label_create(btn);
+                lv_label_set_text(label, key_label(ctx, key));
+                lv_label_set_recolor(label, true);
+                ime_style_apply_font(label, key_caption_font(key));
+                lv_obj_center(label);
+            }
 
             if (key->action == IME_KEY_NONE) {
                 lv_obj_add_state(btn, LV_STATE_DISABLED);
@@ -543,6 +660,20 @@ void ime_ui_apply_keyboard(lv_pinyin_ime_ctx_t *ctx, const ime_keyboard_t *kb)
                 lv_obj_add_event_cb(btn, bksp_hold_end_cb, LV_EVENT_RELEASED, ctx);
                 lv_obj_add_event_cb(btn, bksp_hold_end_cb, LV_EVENT_PRESS_LOST, ctx);
             }
+
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+            if (key->action == IME_KEY_VOICE) {
+                /*
+                 * 语音键走"按下 / 松手"而不是 CLICKED —— 对讲模式需要"按下"这一刻
+                 * （CLICKED 只在松手时来一次）。按下那一下同时也注册了 CLICKED，
+                 * 这里不去管它：handle_key 对 IME_KEY_VOICE 是空操作（见
+                 * lv_pinyin_ime.c），不会重复触发。
+                 */
+                lv_obj_add_event_cb(btn, voice_pressed_cb, LV_EVENT_PRESSED, ctx);
+                lv_obj_add_event_cb(btn, voice_released_cb, LV_EVENT_RELEASED, ctx);
+                lv_obj_add_event_cb(btn, voice_press_lost_cb, LV_EVENT_PRESS_LOST, ctx);
+            }
+#endif
         }
     }
 }
