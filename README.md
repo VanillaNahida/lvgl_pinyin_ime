@@ -37,6 +37,13 @@ commit target and pinyin decoding.
 [Quick start](#quick-start-run-the-example). To wire it into your own project,
 see [Use it in your own project](#use-it-in-your-own-project).
 
+## Todo List:
+
+- [x] Add voice input support.
+- [x] Add word frequency sorting. (Beta)
+- [ ] Add word association.
+- [ ] Add common word memory.
+
 ## Quick start (run the example)
 
 Four steps: prepare the environment, generate the dictionary and fonts, build,
