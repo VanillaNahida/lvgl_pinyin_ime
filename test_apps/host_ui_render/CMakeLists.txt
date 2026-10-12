@@ -80,6 +80,8 @@ add_executable(host_ui_render
     "${REPO_ROOT}/src/ui/lv_pinyin_ime.c"
     "${REPO_ROOT}/src/ui/lv_pinyin_ime_cand.c"
     "${REPO_ROOT}/src/ui/lv_pinyin_ime_kb.c"
+    "${REPO_ROOT}/src/ui/ime_layout.c"
+    "${REPO_ROOT}/src/ui/ime_keymaps.c"
     "${REPO_ROOT}/src/ui/lv_pinyin_ime_style.c"
     "${REPO_ROOT}/src/core/ime_session.c"
     "${REPO_ROOT}/src/core/ime_t9.c"
@@ -94,6 +96,19 @@ add_executable(host_ui_render
 
 if(IME_HOST_REAL_FONT)
     target_compile_definitions(host_ui_render PRIVATE IME_FONT_EMBEDDED)
+endif()
+
+# 语音页的几何在 `#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE` 里，而真的语音实现要
+# WebSocket/FreeRTOS，主机跑不起来。打开这个选项时用 voice_stub.c 顶掉会话那一层，
+# 于是"语音页排版对不对"也能在 PC 上看（IME_HOST_VOICE=ON 时 mode 用 voice）：
+#
+#   cmake -S test_apps/host_ui_render -B build/host_ui_render_voice -G "MinGW Makefiles" -DIME_HOST_VOICE=ON
+#
+option(IME_HOST_VOICE "Build the voice page with a stubbed session" OFF)
+if(IME_HOST_VOICE)
+    target_sources(host_ui_render PRIVATE voice_stub.c
+        "${REPO_ROOT}/src/ui/mic_icon.c")   # 语音页的麦克风位图
+    target_compile_definitions(host_ui_render PRIVATE CONFIG_LV_PINYIN_IME_VOICE_ENABLE=1)
 endif()
 
 # ime_dict.c calls ime_dict_self_test() during engine bring-up and the payload

@@ -11,6 +11,7 @@
 #include "lvgl.h"
 
 #include "core/ime_session.h"
+#include "ime_layout.h"     /* ime_key_t / ime_row_t / ime_keyboard_t + the geometry solver */
 #include "lvgl_pinyin_ime/lv_pinyin_ime_types.h"
 #include "lv_pinyin_ime_style.h"
 
@@ -21,30 +22,37 @@ extern "C" {
 /**
  * Default height of one key row / candidate row in pixels.
  *
- * 28 keeps the keys close to square: a 26-key letter key is about 20 px wide, and
- * the reference layout's keys are only slightly taller than wide. Four of these
- * plus the candidate bar and the widget padding still fit the shortest supported
- * screen (240 px).
+ * The value lives in ime_layout.h because the layout engine's theme carries it
+ * too (theme->row_height_pref); two copies of "28" is how the row height and the
+ * layout's idea of the row height drift apart.
  *
  * The height actually used at build time is IME_UI_ROW_HEIGHT_PX, which
  * lv_pinyin_ime_set_row_height() overrides. A large panel wants taller rows:
  * with the default, the 5-row 26-key layout is only about 150 px tall, which on
  * a 480 px screen leaves the keys small and hard to hit.
  */
-#define IME_UI_ROW_HEIGHT_DEFAULT 28
+#define IME_UI_ROW_HEIGHT_DEFAULT IME_LAYOUT_ROW_HEIGHT_DEFAULT
 
 /**
- * Key layout grid. A row spans IME_UI_ROW_UNITS units; each key is placed on that
- * grid rather than stretched by flexbox, so the gaps are even and the columns
- * line up between rows. These are shared with the unit calculation in
- * lv_pinyin_ime.c so the two cannot drift apart.
+ * Margin applied by the widget root's own style (see ime_style_apply_root) and
+ * the gap between the root's children.
+ *
+ * ★ 键盘区的坐标原点是 ctx->kb_rows —— 它在 root 的内容区里，root 的 pad_all 已经
+ *   让出了这两个像素。所以布局引擎的 outer_pad_* 必须是 0：同一份间距算两次，正是
+ *   旧 update_unit_px() 从父对象宽度里再扣一次 IME_UI_PAD 时的毛病。
  */
-#define IME_UI_ROW_UNITS 12
-#define IME_UI_KEY_GAP 3
-#define IME_UI_PAD 2
+#define IME_UI_PAD IME_STYLE_ROOT_PAD
 
 /** Candidates drawn at once in the candidate bar (one page). */
 #define IME_UI_CAND_MAX 12
+
+/**
+ * Upper bound of the keys of one keyboard (the static rectangle buffer).
+ *
+ * The value lives in ime_layout.h: it is the capacity ime_layout_solve() needs,
+ * not a UI detail, and host_layout_test asserts every table fits in it.
+ */
+#define IME_UI_KEY_MAX IME_LAYOUT_KEY_MAX
 
 /**
  * 语音预览快照缓冲的长度（"这段预览之前输入框长什么样"）。
@@ -108,45 +116,12 @@ extern int IME_UI_ROW_HEIGHT_PX;
  */
 extern int IME_UI_FIT_HEIGHT_PX;
 
-/** What a key does when pressed. */
-typedef enum {
-    IME_KEY_NONE = 0,
-    IME_KEY_LETTER,     /**< ASCII letter, `label` holds it */
-    IME_KEY_DIGIT,      /**< 9-key digit group, `label` is "ABC".."WXYZ" */
-    IME_KEY_TEXT,       /**< commit `text` verbatim */
-    IME_KEY_FULLWIDTH,  /**< commit `label`, full width in Chinese mode */
-    IME_KEY_BACKSPACE,
-    IME_KEY_ENTER,
-    IME_KEY_SPACE,
-    IME_KEY_SHIFT,
-    IME_KEY_CONFIRM,
-    IME_KEY_SEPARATOR,  /**< 分词 / 分隔: insert '\'' */
-    IME_KEY_SWITCH_KB,  /**< 26-key <-> 9-key */
-    IME_KEY_LANG,       /**< toggle Chinese / English */
-    IME_KEY_PANEL,      /**< open the panel named in `text` */
-    IME_KEY_T9_PINYIN,  /**< 选拼音: show / hide the 9-key pinyin row */
-    IME_KEY_VOICE,      /**< 语音输入: start / stop a recognition session */
-} ime_key_action_t;
-
-/** One key of a keyboard row. */
-typedef struct {
-    const char *label;
-    const char *text;       /**< payload for TEXT / PANEL actions */
-    uint8_t width_u;        /**< width in tenths of a unit, 10 = 1u */
-    ime_key_action_t action;
-} ime_key_t;
-
-/** One row of a keyboard. */
-typedef struct {
-    const ime_key_t *keys;
-    size_t count;
-} ime_row_t;
-
-/** A complete keyboard. */
-typedef struct {
-    const ime_row_t *rows;
-    size_t row_count;
-} ime_keyboard_t;
+/**
+ * The key data model (ime_key_action_t, ime_key_t, ime_row_t, ime_keyboard_t)
+ * moved to ime_layout.h: it is the layout engine's input, and the engine has to
+ * build on a host *without* LVGL. This header includes it, so nothing else has
+ * to change.
+ */
 
 #ifndef IME_UI_PINYIN_TEXT_MAX
 #define IME_UI_PINYIN_TEXT_MAX 96
@@ -198,6 +173,20 @@ typedef struct {
 
     /* keyboard */
     lv_obj_t *kb_rows;
+
+    /*
+     * 最近一次布局求解的结果（ime_layout_measure/solve/validate 的输出）。
+     *
+     * ★ 留在 ctx 里而不是当场丢掉：真机上"某一行偏了 / 某个键被裁了"只能靠
+     *   lv_pinyin_ime_dump() 打出来的这几行数字判断，而重新求解一次需要键盘表和
+     *   当前尺寸 —— 那正是出问题时最不可靠的两样东西。开销是每个控件几十字节。
+     */
+    ime_layout_metrics_t kb_metrics;
+    ime_layout_report_t  kb_report;
+    /** 当前键盘建出来的键数（= 平铺在 kb_rows 下的子对象个数）。 */
+    size_t kb_key_count;
+    /** 上一次求解时 kb_rows 的内容宽度：尺寸回调靠它判断"宽度真的变了没有"。 */
+    int32_t kb_area_w;
 
     /*
      * Backspace hold state: LVGL repeats LV_EVENT_LONG_PRESSED_REPEAT every
@@ -258,11 +247,37 @@ void ime_root_delete_cb(lv_event_t *e);
 /* ---------------------------------------------------------------- fit sizing */
 
 /**
- * Re-derive the row height from IME_UI_FIT_HEIGHT_PX and the *visible* row
- * count, then apply it to the candidate bar, the 9-key pinyin row and every
- * key row. No-op when fitting is disabled (IME_UI_FIT_HEIGHT_PX <= 0).
+ * Re-derive the row height and re-solve the current keyboard's geometry, then
+ * move/resize the keys that are already on screen.
+ *
+ * Two callers, one reason: IME_UI_FIT_HEIGHT_PX changes the row height (and with
+ * it the whole keyboard), and the 9-key pinyin row appearing/disappearing changes
+ * how many rows share that height. Rebuilding the objects instead would be a
+ * waste - and would drop the backspace hold state.
  */
 void ime_ui_apply_sizes(lv_pinyin_ime_ctx_t *ctx);
+
+/**
+ * Derive IME_UI_ROW_HEIGHT_PX from IME_UI_FIT_HEIGHT_PX and the number of rows
+ * @p kb will need (candidate bar + optional 9-key pinyin row + key rows).
+ *
+ * Called *before* a keyboard is built (see ime_ui_rebuild_keyboard) so the keys
+ * are created at the final height instead of being moved right afterwards. No-op
+ * when fitting is disabled: the row height is a constant then.
+ */
+void ime_ui_fit_row_height(lv_pinyin_ime_ctx_t *ctx, const ime_keyboard_t *kb);
+
+/**
+ * Height available to the keyboard rows in px, or 0 when the caller does not know
+ * it (no fit target): the layout engine then uses the preferred row height.
+ */
+int32_t ime_ui_keyboard_area_height(const lv_pinyin_ime_ctx_t *ctx);
+
+/** Re-solve the active keyboard and move the keys already on screen (may rebuild). */
+void ime_ui_relayout_keyboard(lv_pinyin_ime_ctx_t *ctx);
+
+/** Hook kb_rows' LV_EVENT_SIZE_CHANGED (called once, from create()). */
+void ime_ui_keyboard_watch_size(lv_pinyin_ime_ctx_t *ctx);
 
 /* ------------------------------------------------------------- candidates */
 
@@ -292,7 +307,23 @@ void ime_ui_rebuild_keyboard(lv_pinyin_ime_ctx_t *ctx);
 /** Keyboard description for the active mode / panel / language. */
 const ime_keyboard_t *ime_ui_active_keyboard(const lv_pinyin_ime_ctx_t *ctx);
 
-/** Create the buttons of one keyboard. */
+/**
+ * Solve the geometry of @p kb for the current keyboard area and fill @p rects
+ * (row-major key order, ime_layout_key_count(kb) entries).
+ *
+ * Fills ctx->kb_metrics / ctx->kb_report with what was measured and checked, so
+ * lv_pinyin_ime_dump() can print the numbers the layout was built from.
+ */
+bool ime_ui_calculate_layout(lv_pinyin_ime_ctx_t *ctx, const ime_keyboard_t *kb,
+                             ime_key_rect_t *rects, size_t cap);
+
+/**
+ * Create the buttons of one keyboard (cleaning whatever was there before).
+ *
+ * Geometry comes from ime_ui_calculate_layout(); this function only creates
+ * objects, applies styles and wires the existing event callbacks, so layout and
+ * interaction can be changed independently.
+ */
 void ime_ui_apply_keyboard(lv_pinyin_ime_ctx_t *ctx, const ime_keyboard_t *kb);
 
 /* ------------------------------------------------------------------- misc */

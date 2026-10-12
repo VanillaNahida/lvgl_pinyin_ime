@@ -11,6 +11,18 @@
 extern "C" {
 #endif
 
+/**
+ * Padding inside the widget root and the gap between the root's children.
+ *
+ * ★ 唯一的定义处：ime_style_apply_root() 把这两个值写进样式，而控件的垂直分摊
+ *   （ime_ui_apply_sizes）必须减掉**同样的**数值。以前两边各写一遍 2 和 3，改一处
+ *   忘一处就是"总高度差几个像素"这类难查的问题。
+ *
+ * ★ 键盘区内部（布局引擎的 outer_pad_*）因此必须是 0：root 已经让出了这份间距。
+ */
+#define IME_STYLE_ROOT_PAD 2
+#define IME_STYLE_ROOT_GAP 3
+
 /** Create the shared styles. Idempotent. */
 void ime_style_init(void);
 

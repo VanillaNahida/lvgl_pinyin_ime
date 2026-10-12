@@ -47,7 +47,7 @@ __pycache__/
 Thumbs.db
 Desktop.ini
 
-assets/
+others/
 *.dat
 
 # Build trees under the tracked host test / probe sources.

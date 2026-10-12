@@ -33,9 +33,12 @@ UI 层（唯一依赖 lvgl）
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/ui/lv_pinyin_ime.c` | 根对象：生命周期、尺寸/字体全局状态、事件分发、退格长按、按键分发 |
+| `src/ui/lv_pinyin_ime.c` | 根对象：生命周期、尺寸/字体全局状态、事件分发、退格长按、按键分发、垂直高度分摊 |
 | `src/ui/lv_pinyin_ime_cand.c` | 候选栏：拼音浮窗 + 候选词行 + `<` `>` 翻页 |
-| `src/ui/lv_pinyin_ime_kb.c` | 键盘表与构建：26 键 / 九键 / P1–P3 面板、键位布局、重建 |
+| `src/ui/lv_pinyin_ime_kb.c` | 键盘渲染：按矩形建键、样式、事件回调、语音页三区段（**不含几何计算**） |
+| `src/ui/ime_layout.c` | 布局引擎：尺寸测量、标准键宽、行居中、填充分配、行高、矩形校验（**不依赖 LVGL**） |
+| `src/ui/ime_layout.h` | 键盘数据模型（`ime_key_t` / `ime_row_t` / `ime_keyboard_t`）+ 几何 API |
+| `src/ui/ime_keymaps.c` | 键位表：26 键 / 九键 / P1–P3 面板 / 语音页（纯数据，可脱离 LVGL 测试） |
 | `src/ui/lv_pinyin_ime_style.c` | 默认样式，可被应用覆盖 |
 | `src/ui/mic_icon.c` | 语音键的麦克风图标（内嵌位图） |
 | `src/ui/lv_pinyin_ime_internal.h` | UI 各编译单元共享的私有状态，不对外 |
@@ -170,7 +173,38 @@ ime_engine_search(全拼串)
 | 哈希表 `ime_hash.c` | 计划用于联想 bigram 与用户词频（尚未接线） | 开放寻址 + 线性探测 + 墓碑槽位，容量固定为 2 的幂，键为组件自持副本 |
 | 前缀索引 `ime_trie.c` | 九键数字 → 拼音（`94` → `xi`/`yi`/`zi`；`9464` → `xing`/`ying`），最短拼写优先 | 音节表按数字串排序，全表扫描，不建节点表、不额外占 RAM |
 
-## 7. 内存预算（ESP32-S3-N16R8，8 MB PSRAM）
+### 6.1 布局引擎（几何与渲染分离）
+
+键盘的几何**不**由 LVGL 的 flex 决定，而是由一个独立的求解器算出来，渲染层只负责把矩形
+交给控件。分三层，依赖是单向的：
+
+```
+ime_keymaps.c        键位表（纯数据）           ← 只 include ime_layout.h
+      │
+      ▼
+ime_layout.c/.h      几何求解（纯算术，不依赖 LVGL）
+      │  measure → solve → validate
+      ▼
+lv_pinyin_ime_kb.c   建控件：样式 / 键面 / 事件   ← 唯一的 LVGL 依赖
+```
+
+- **坐标原点**：`ctx->kb_rows` 的内容区。控件 root 的样式已经带了 `pad_all(2)` 与
+  `pad_row(3)`，所以布局引擎的 `outer_pad_*` 是 0 —— 同一份间距不能算两次。
+- **标准键宽 U**：由键盘的参考行（`ime_keyboard_t::ref_row`，26 键是 R1）反算，
+  `U = (网格宽度 - 间距) / (参考行权重 / 10)`，以 1/1000 px 定点保存。
+  行对齐模式见 `ime_row_align_t`：`CENTER` 行的 `width_u` 是 U 的十分之一（按标准键宽
+  排好后整行居中），`FILL` 行的 `width_u` 只是行内比例（整行铺满网格）。
+- **取整**：`CENTER` 行按 `metrics.round_widths` 全体统一取整（四舍五入放不下就全体向下
+  取整），保证**同一个逻辑宽度的键在任何行都是同一个像素宽度**；`FILL` 行用最大余数法，
+  保证等权重的键等宽、且整行一个像素都不剩。
+- **行高**：候选栏 + 九键拼音行 + 键盘行共享一个行高。fit 模式下由
+  `ime_ui_fit_row_height()` 一次解出（行数已知，避免"高度取决于行高、行高又取决于高度"）；
+  语音页反过来用 `ime_layout_measure_ref()` 从确定高度反推，三区段自己分摊。
+- **自检**：每次求解后跑 `ime_layout_validate()`（越界 / 重叠 / 间距 / 居中 / 尺寸上限），
+  结果留在 `ctx->kb_report`，`lv_pinyin_ime_dump()` 会打出来。纯几何的断言在
+  `test_apps/host_layout_test`（不需要 LVGL 库），渲染层的断言在 `test_apps/host_ui_render`。
+
+
 
 | 项 | 规模 | 位置 |
 | --- | --- | --- |

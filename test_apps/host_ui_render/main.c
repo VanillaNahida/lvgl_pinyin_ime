@@ -9,19 +9,33 @@
  * geometry of the objects that should be visible. This is how a layout problem
  * is caught without a board:
  *
- *   cmake -S test_apps/host_ui_render -B build/host_ui_render -G Ninja
+ *   cmake -S test_apps/host_ui_render -B build/host_ui_render -G "MinGW Makefiles"
  *   cmake --build build/host_ui_render
- *   ./build/host_ui_render/host_ui_render out.ppm [k26|k9|p1|en] [拼音| -] [动作| -]
+ *   ./build/host_ui_render/host_ui_render out.ppm [k26|k9|p1|p1alt|p2|p3|en] [拼音| -] [动作| -] [宽x高] [目标高度]
  *
  * The third argument types lower-case letters through the session (so candidates
  * and the pinyin chip appear); the fourth drives one interaction and *asserts*
  * its result (the exit code is non-zero on failure):
  *
+ *   layout   the geometry of the current keyboard / panel: every key inside the
+ *            area, no overlaps, even gaps, centered rows, the letters the same
+ *            width on every row, and every widget exactly where the layout put
+ *            it. This is the multi-resolution check: run it with 240x320,
+ *            320x240, 480x320, 800x480 ... and with a target height (the sixth
+ *            argument) to exercise the fit path.
  *   shift    English: the caps-lock key is a one-shot, and it must return to off
  *            after the first letter; Chinese: the key must do nothing at all
  *   shift2   English: the second press locks, every letter is upper case
+ *   oneshot  English: press shift, tap a letter - the caption goes back to lower
+ *            case (run it with the "en" mode)
  *   hold     hold the backspace key: the "左滑清空输入框" hint has to appear
  *   clear    hold, then slide left past the hint: the text area is cleared
+ *   chip     the pinyin chip floats above the widget without reserving space
+ *   fit      long candidates have to fit the candidate row
+ *   press    a pressed candidate / letter / latched shift key has a visible fill
+ *
+ * 语音页（三个区段 + 圆形麦克风）需要 -DIME_HOST_VOICE=ON 配置出来的构建
+ * （见 CMakeLists.txt），mode 用 voice；`layout` 会断言区段首尾相接、圆居中。
  *
  * PPM is not readable by most viewers; tools/ppm2png.py converts it (standard
  * library only):
@@ -62,27 +76,26 @@ static void check(bool ok, const char *what)
 /**
  * Find a key button: by action, and for IME_KEY_LETTER also by its (always
  * lower-case) label. `letter == '\0'` matches any letter key.
+ *
+ * ★ 按键现在是 kb_rows 的**直接子对象**（布局引擎给绝对矩形，没有行容器那一层），
+ *   所以这里直接遍历它的子对象，每个键的 user_data 就是键表里的那一项。
  */
 static lv_obj_t *find_key_in(lv_pinyin_ime_ctx_t *ctx, ime_key_action_t action, char letter)
 {
     if (ctx == NULL || ctx->kb_rows == NULL) {
         return NULL;
     }
-    uint32_t rows = lv_obj_get_child_count(ctx->kb_rows);
-    for (uint32_t r = 0; r < rows; r++) {
-        lv_obj_t *row = lv_obj_get_child(ctx->kb_rows, r);
-        uint32_t keys = lv_obj_get_child_count(row);
-        for (uint32_t k = 0; k < keys; k++) {
-            lv_obj_t *btn = lv_obj_get_child(row, k);
-            const ime_key_t *key = lv_obj_get_user_data(btn);
-            if (key == NULL || key->action != action) {
-                continue;
-            }
-            if (letter != '\0' && key->label[0] != letter) {
-                continue;
-            }
-            return btn;
+    uint32_t keys = lv_obj_get_child_count(ctx->kb_rows);
+    for (uint32_t k = 0; k < keys; k++) {
+        lv_obj_t *btn = lv_obj_get_child(ctx->kb_rows, k);
+        const ime_key_t *key = lv_obj_get_user_data(btn);
+        if (key == NULL || key->action != action) {
+            continue;
         }
+        if (letter != '\0' && key->label[0] != letter) {
+            continue;
+        }
+        return btn;
     }
     return NULL;
 }
@@ -127,7 +140,18 @@ static void type_text(lv_obj_t *ime, const char *text)
     lv_obj_update_layout(ime);
 }
 
-static uint8_t s_buf[320 * 240 * 4];
+static uint8_t s_buf[800 * 600 * 4];
+
+/** 第五个参数（可选）的显示分辨率，"宽x高"，例如 240x320 / 480x320。 */
+static void parse_size(const char *arg, int *w, int *h)
+{
+    int pw = 0, ph = 0;
+    if (arg != NULL && sscanf(arg, "%dx%d", &pw, &ph) == 2 && pw > 0 && ph > 0 &&
+        (size_t)pw * (size_t)ph * 4 <= sizeof(s_buf)) {
+        *w = pw;
+        *h = ph;
+    }
+}
 
 static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
@@ -239,10 +263,21 @@ int main(int argc, char **argv)
      * positional arguments aligned. */
     const char *pinyin = (argc > 3 && strcmp(argv[3], "-") != 0) ? argv[3] : "";
     const char *action = (argc > 4 && strcmp(argv[4], "-") != 0) ? argv[4] : "";
+    int scr_w = 320, scr_h = 240;
+    parse_size((argc > 5) ? argv[5] : NULL, &scr_w, &scr_h);
+    /*
+     * 第七个参数（可选）"hidden"：先把键盘建在一个**隐藏**的父容器里，再显示出来。
+     *
+     * ★ 为什么要专门测这一条：按键用的是从 kb_rows 宽度算出来的绝对坐标，而隐藏的
+     *   父容器宽度是 0 —— 建键盘的那一刻根本没有几何可算。控件必须能靠
+     *   kb_rows 的 LV_EVENT_SIZE_CHANGED（显示时才算得出宽度）把键盘补出来，
+     *   否则"先建键盘、后显示输入框"这种用法会得到一个**空键盘**。
+     */
+    const bool hidden_parent = (argc > 7) && strcmp(argv[7], "hidden") == 0;
 
     lv_init();
 
-    lv_display_t *disp = lv_display_create(320, 240);
+    lv_display_t *disp = lv_display_create(scr_w, scr_h);
     lv_display_set_flush_cb(disp, flush_cb);
     lv_display_set_buffers(disp, s_buf, NULL, sizeof(s_buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
 
@@ -250,7 +285,7 @@ int main(int argc, char **argv)
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x101418), LV_PART_MAIN);
 
     lv_obj_t *ta = lv_textarea_create(scr);
-    lv_obj_set_width(ta, 300);
+    lv_obj_set_width(ta, scr_w - 20);
     lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 8);
     lv_textarea_set_one_line(ta, true);
     lv_textarea_set_placeholder_text(ta, "输入文字...");
@@ -265,6 +300,9 @@ int main(int argc, char **argv)
     lv_obj_set_size(box, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_align(box, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    if (hidden_parent) {
+        lv_obj_add_flag(box, LV_OBJ_FLAG_HIDDEN);
+    }
 
     printf("creating the IME ...\n");
     lv_obj_t *ime = lv_pinyin_ime_create(box);
@@ -276,14 +314,52 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    if (hidden_parent) {
+        /* 建的时候父容器是隐藏的（宽度 0）：键建不出来，只剩候选栏那几行。 */
+        printf("hidden parent: %u objects in the keyboard area before it is shown\n",
+               (unsigned)lv_obj_get_child_count(ime_ctx_get(ime)->kb_rows));
+        lv_obj_remove_flag(box, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_update_layout(scr);   /* 宽度这一步才算出来 -> SIZE_CHANGED -> 补建键盘 */
+        printf("hidden parent: %u objects after showing it\n",
+               (unsigned)lv_obj_get_child_count(ime_ctx_get(ime)->kb_rows));
+    }
+
     lv_pinyin_ime_attach(ime, ta);
 
     if (strcmp(mode, "k9") == 0) {
         lv_pinyin_ime_set_mode(ime, LV_PINYIN_IME_MODE_K9);
     } else if (strcmp(mode, "p1") == 0) {
         lv_pinyin_ime_set_panel(ime, LV_PINYIN_IME_PANEL_NUM_SYM);
+    } else if (strcmp(mode, "p1alt") == 0) {
+        /* P1 的"其他符号"批次：面板内切换，走的是同一个 panel + panel_alt */
+        lv_pinyin_ime_set_panel(ime, LV_PINYIN_IME_PANEL_NUM_SYM);
+        lv_pinyin_ime_ctx_t *c = ime_ctx_get(ime);
+        if (c != NULL) {
+            c->panel_alt = true;
+            ime_ui_rebuild_keyboard(c);
+        }
+    } else if (strcmp(mode, "p2") == 0) {
+        lv_pinyin_ime_set_panel(ime, LV_PINYIN_IME_PANEL_NUM);
+    } else if (strcmp(mode, "p3") == 0) {
+        lv_pinyin_ime_set_panel(ime, LV_PINYIN_IME_PANEL_ALL_SYM);
     } else if (strcmp(mode, "en") == 0) {
         lv_pinyin_ime_set_lang(ime, LV_PINYIN_IME_LANG_EN);
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+    } else if (strcmp(mode, "voice") == 0) {
+        /* 语音页：需要 -DIME_HOST_VOICE=ON 才编得进来（见 CMakeLists.txt）。 */
+        lv_pinyin_ime_set_panel(ime, LV_PINYIN_IME_PANEL_VOICE);
+#endif
+    }
+
+    /*
+     * 第六个参数（可选）：目标总高度（px），等价于应用调
+     * lv_pinyin_ime_set_fit_height()。0/缺省 = 不按目标高度分摊行高。
+     */
+    const int fit_h = (argc > 6) ? atoi(argv[6]) : 0;
+    if (fit_h > 0) {
+        lv_pinyin_ime_set_fit_height(fit_h);
+        /* 行高是建键盘时定下的，所以改完要重建一次才能看到效果。 */
+        ime_ui_rebuild_keyboard(ime_ctx_get(ime));
     }
 
     /* Pre-fill the text area so the backspace and clear gestures have something
@@ -525,14 +601,11 @@ int main(int argc, char **argv)
         }
 
         lv_obj_t *letter = NULL;
-        for (uint32_t r = 0; r < lv_obj_get_child_count(ctx->kb_rows); r++) {
-            lv_obj_t *row = lv_obj_get_child(ctx->kb_rows, r);
-            for (uint32_t k = 0; k < lv_obj_get_child_count(row); k++) {
-                lv_obj_t *btn = lv_obj_get_child(row, k);
-                const ime_key_t *key = lv_obj_get_user_data(btn);
-                if (key != NULL && key->action == IME_KEY_LETTER && key->label[0] == 'q') {
-                    letter = btn;
-                }
+        for (uint32_t k = 0; k < lv_obj_get_child_count(ctx->kb_rows); k++) {
+            lv_obj_t *btn = lv_obj_get_child(ctx->kb_rows, k);
+            const ime_key_t *key = lv_obj_get_user_data(btn);
+            if (key != NULL && key->action == IME_KEY_LETTER && key->label[0] == 'q') {
+                letter = btn;
             }
         }
         if (letter != NULL) {
@@ -559,6 +632,151 @@ int main(int argc, char **argv)
                   lv_obj_get_style_bg_opa(letter, LV_PART_MAIN) > LV_OPA_MIN,
               "a pressed letter key has an opaque background");
     }
+
+    if (strcmp(action, "layout") == 0 && strcmp(mode, "voice") != 0) {
+        /*
+         * 布局自检 + 多分辨率验收（对应《输入法布局优化指南》§11 的验收表）。
+         *
+         * 断言的是**算出来的几何**和**控件真实的坐标**两件事：前者由 ime_layout 保证，
+         * 后者由渲染层保证。两者对不上（算了不用、或者用了旧的）是这类重构最容易
+         * 留下的问题，而它在屏幕上只表现为"某个键偏了几像素"，肉眼很难定位。
+         */
+        lv_pinyin_ime_ctx_t *ctx = ime_ctx_get(ime);
+        lv_obj_update_layout(scr);
+
+        const ime_layout_metrics_t *m = &ctx->kb_metrics;
+        const ime_layout_report_t *rep = &ctx->kb_report;
+        printf("layout: area %dx%d rows=%d row_h=%d unit=%d.%03dpx grid_x=%d grid_w=%d "
+               "gaps %d/%d used_h=%d compact=%d tight=%d\n",
+               (int)m->width, (int)m->height, (int)m->row_count, (int)m->row_height,
+               (int)(m->unit_milli / 1000), (int)(m->unit_milli % 1000), (int)m->x_offset,
+               (int)m->content_width, (int)m->key_gap, (int)m->row_gap, (int)m->used_height,
+               (int)m->compact, (int)m->tight);
+        printf("layout check: keys=%u oob=%u overlap=%u gap=%u align=%u w=%u h=%u\n",
+               (unsigned)rep->keys, (unsigned)rep->out_of_bounds, (unsigned)rep->overlaps,
+               (unsigned)rep->bad_gaps, (unsigned)rep->misaligned,
+               (unsigned)rep->width_violations, (unsigned)rep->height_violations);
+
+        check(rep->keys > 0, "there are keys to check");
+        check(rep->out_of_bounds == 0, "no key sticks out of the keyboard area");
+        check(rep->overlaps == 0, "no two keys overlap");
+        check(rep->bad_gaps == 0, "the gap between two keys is the theme's gap");
+        check(rep->misaligned == 0, "every centered row is centered");
+        check(rep->width_violations == 0, "no key is below the minimum touch width");
+        check(rep->height_violations == 0, "the row height is within its limits");
+        check(!m->tight, "the layout fits without shrinking below the design minimum");
+
+        /* 每个键的矩形 vs 控件的真实坐标 */
+        const ime_keyboard_t *kb = ime_ui_active_keyboard(ctx);
+        ime_key_rect_t rects[IME_UI_KEY_MAX];
+        const uint32_t keys = lv_obj_get_child_count(ctx->kb_rows);
+        if (ime_ui_calculate_layout(ctx, kb, rects, IME_UI_KEY_MAX)) {
+            int mismatch = 0;
+            for (uint32_t i = 0; i < keys && i < IME_UI_KEY_MAX; i++) {
+                lv_obj_t *btn = lv_obj_get_child(ctx->kb_rows, i);
+                if (lv_obj_get_x(btn) != rects[i].x || lv_obj_get_y(btn) != rects[i].y ||
+                    lv_obj_get_width(btn) != rects[i].width ||
+                    lv_obj_get_height(btn) != rects[i].height) {
+                    mismatch++;
+                    printf("  key %u: widget (%d,%d) %dx%d vs layout (%d,%d) %dx%d\n",
+                           (unsigned)i, (int)lv_obj_get_x(btn), (int)lv_obj_get_y(btn),
+                           (int)lv_obj_get_width(btn), (int)lv_obj_get_height(btn),
+                           (int)rects[i].x, (int)rects[i].y, (int)rects[i].width,
+                           (int)rects[i].height);
+                }
+            }
+            check(mismatch == 0, "every key sits exactly where the layout put it");
+        }
+
+        /*
+         * 26 键：字母键在 R1/R2/R3 上宽度必须完全相同（标准键宽的直接证据）。
+         * 旧实现每行各自分摊宽度，这三行的字母宽度是三套不同的值。
+         */
+        if (strcmp(mode, "k26") == 0 && strcmp(mode, "en") != 0) {
+            lv_obj_t *q = find_letter_key(ime, 'q');
+            lv_obj_t *a = find_letter_key(ime, 'a');
+            lv_obj_t *z = find_letter_key(ime, 'z');
+            const int wq = (q != NULL) ? lv_obj_get_width(q) : -1;
+            const int wa = (a != NULL) ? lv_obj_get_width(a) : -2;
+            const int wz = (z != NULL) ? lv_obj_get_width(z) : -3;
+            printf("  letter widths: q=%d a=%d z=%d (R1/R2/R3)\n", wq, wa, wz);
+            check(wq > 0 && wq == wa && wa == wz,
+                  "the letter keys have the same width on every row");
+        }
+
+        /* 每一行的左右边界与行高（配合多分辨率一起看） */
+        int last_y = -1;
+        for (uint32_t i = 0; i < keys; i++) {
+            lv_obj_t *btn = lv_obj_get_child(ctx->kb_rows, i);
+            const int y = lv_obj_get_y(btn);
+            if (y != last_y) {
+                last_y = y;
+                printf("  row at y=%d h=%d: ", y, (int)lv_obj_get_height(btn));
+            }
+            printf("[%s x=%d w=%d] ", lv_obj_get_user_data(btn) != NULL
+                                         ? ((const ime_key_t *)lv_obj_get_user_data(btn))->label
+                                         : "?",
+                   (int)lv_obj_get_x(btn), (int)lv_obj_get_width(btn));
+            lv_obj_t *next = (i + 1 < keys) ? lv_obj_get_child(ctx->kb_rows, i + 1) : NULL;
+            if (next == NULL || lv_obj_get_y(next) != y) {
+                printf("\n");
+            }
+        }
+    }
+
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+    if (strcmp(action, "layout") == 0 && strcmp(mode, "voice") == 0) {
+        /*
+         * 语音页的验收（指南 §11 那一行"圆形麦克风保持居中，底部操作区稳定"）：
+         * 三个区段必须首尾相接、互不重叠，圆的直径由可用宽高约束、并真正居中。
+         */
+        lv_pinyin_ime_ctx_t *ctx = ime_ctx_get(ime);
+        lv_obj_update_layout(scr);
+
+        const uint32_t zones = lv_obj_get_child_count(ctx->kb_rows);
+        const int kb_h = lv_obj_get_height(ctx->kb_rows);
+        const int kb_w = lv_obj_get_width(ctx->kb_rows);
+        printf("voice page: %ux%d, %u zones\n", kb_w, kb_h, (unsigned)zones);
+        check(zones == 3, "the voice page has three zones");
+
+        int prev_bottom = -1;
+        for (uint32_t i = 0; i < zones; i++) {
+            lv_obj_t *z = lv_obj_get_child(ctx->kb_rows, i);
+            const int zx = lv_obj_get_x(z), zy = lv_obj_get_y(z);
+            const int zw = lv_obj_get_width(z), zh = lv_obj_get_height(z);
+            printf("  zone %u: (%d,%d) %dx%d, %u children\n", (unsigned)i, zx, zy, zw, zh,
+                   (unsigned)lv_obj_get_child_count(z));
+            check(zx >= 0 && zy >= 0 && zx + zw <= kb_w && zy + zh <= kb_h,
+                  "the zone is inside the keyboard area");
+            check(zh > 0 && zw > 0, "the zone has a real size");
+            if (i > 0) {
+                check(zy >= prev_bottom, "the zones do not overlap");
+            }
+            prev_bottom = zy + zh;
+        }
+        check(prev_bottom == kb_h, "the zones fill the keyboard area exactly");
+
+        /* 圆形麦克风：正方形（= 圆）、在自己的区段里居中、不越界。 */
+        lv_obj_t *mic = ctx->voice_page_mic;
+        check(mic != NULL, "the mic button exists");
+        if (mic != NULL) {
+            lv_obj_t *zone = lv_obj_get_parent(mic);
+            lv_area_t za, ma;
+            lv_obj_get_coords(zone, &za);   /* 绝对坐标：区段与圆各在不同的父对象里 */
+            lv_obj_get_coords(mic, &ma);
+            const int d = lv_area_get_width(&ma);
+            const int dx = ((za.x1 + za.x2) / 2) - ((ma.x1 + ma.x2) / 2);
+            const int dy = ((za.y1 + za.y2) / 2) - ((ma.y1 + ma.y2) / 2);
+            printf("  mic: d=%d, offset from the zone centre (%d,%d)\n", d, dx, dy);
+            check(lv_area_get_width(&ma) == lv_area_get_height(&ma),
+                  "the mic is a circle (square button + full radius)");
+            check(dx >= -1 && dx <= 1 && dy >= -1 && dy <= 1, "the mic is centered in its zone");
+            check(d >= 24, "the mic is big enough to hit");
+            check(d <= lv_area_get_width(&za) && d <= lv_area_get_height(&za),
+                  "the mic fits inside its zone");
+        }
+    }
+#endif
 
     lv_obj_update_layout(scr);
 

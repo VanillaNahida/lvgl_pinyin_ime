@@ -92,33 +92,14 @@ void ime_root_delete_cb(lv_event_t *e)
     lv_free(ctx);
 }
 
-/**
- * Derive the layout unit from the parent width so the keys fill the screen.
- *
- * A row is IME_UI_ROW_UNITS units plus a IME_UI_KEY_GAP between each of its keys,
- * so the unit has to leave that many gaps of room. The constants live in
- * lv_pinyin_ime_internal.h next to the key placement that uses them.
+/*
+ * Clamp range for lv_pinyin_ime_set_row_height(). Below 16 px the glyphs no
+ * longer fit, above 256 px one row would fill a small screen on its own. The
+ * numbers come from the layout theme (ime_layout.h) so "the smallest row the
+ * widget will draw" has exactly one definition.
  */
-static void update_unit_px(lv_obj_t *parent)
-{
-    lv_coord_t width = (parent != NULL) ? lv_obj_get_width(parent) : 0;
-    if (width <= 0) {
-        width = 320;
-    }
-
-    /* The widget's own padding, plus the gap between each pair of keys. */
-    int usable = (int)width - 2 * IME_UI_PAD - (IME_UI_ROW_UNITS - 1) * IME_UI_KEY_GAP;
-    int unit = usable / IME_UI_ROW_UNITS;
-    if (unit < 12) {
-        unit = 12;
-    }
-    IME_UI_UNIT_PX = unit;
-}
-
-/* Clamp range for lv_pinyin_ime_set_row_height(): below 16 px the glyphs no
- * longer fit, above 256 px one row would fill a small screen on its own. */
-#define IME_UI_ROW_HEIGHT_MIN 16
-#define IME_UI_ROW_HEIGHT_MAX 256
+#define IME_UI_ROW_HEIGHT_MIN IME_LAYOUT_MIN_KEY_HEIGHT
+#define IME_UI_ROW_HEIGHT_MAX IME_LAYOUT_MAX_KEY_HEIGHT
 
 void lv_pinyin_ime_set_row_height(int px)
 {
@@ -154,12 +135,10 @@ void lv_pinyin_ime_set_fit_height(int px)
 
 /*
  * Fit sizing: derive the row height from the target total height and the
- * *visible* rows, then apply it to the candidate bar, the 9-key pinyin row and
- * every key row.
+ * *visible* rows, then hand it to the layout engine (which moves the keys).
  *
  * The root is a flex column: pad_all 2 + 2 (top/bottom), pad_row 3 between its
  * children (candidate bar, 9-key pinyin row when visible, key rows container).
- * The key rows container is a flex column too: pad_row 3 between the key rows.
  * Hidden children are skipped by the flex layout, so "visible rows" is exactly
  * what the layout measures:
  *
@@ -167,19 +146,37 @@ void lv_pinyin_ime_set_fit_height(int px)
  *   fixed      = 4 + 3*(root_children - 1) + 3*(key_rows - 1)
  *   row_height = (fit - fixed) / rows_total
  *
- * Called at create and after every rebuild, so mode / panel / language / T9
- * switches keep the keyboard filling the same target height. The keys are sized
- * by flex grow from the parent width, so scaling the row height scales the whole
- * keyboard in both dimensions.
+ * ★ 为什么行高在这里算、而不是交给布局引擎从"键盘区高度"反推：键盘区高度本身取决于
+ *   候选栏和九键拼音行的高度，而那两行**用的就是同一个行高** —— 交给引擎就成了
+ *   "高度取决于行高、行高又取决于高度"。这里一次解出来（行数是已知的），引擎那边
+ *   再用 height<=0 → row_height_pref 的路径接手，两边都不需要迭代。
+ *   语音页没有这个问题：它只有 kb_rows 一个可见子对象，键盘区高度能直接算出来，
+ *   所以那一页走的是引擎的 "height>0 → 反推行高" 那条路。
+ *
+ * Called before every keyboard build and after every rebuild trigger, so mode /
+ * panel / language / T9 switches keep the keyboard filling the same target
+ * height.
  */
-void ime_ui_apply_sizes(lv_pinyin_ime_ctx_t *ctx)
+void ime_ui_fit_row_height(lv_pinyin_ime_ctx_t *ctx, const ime_keyboard_t *kb)
 {
-    if (ctx == NULL || ctx->kb_rows == NULL || IME_UI_FIT_HEIGHT_PX <= 0) {
+    if (ctx == NULL || kb == NULL || IME_UI_FIT_HEIGHT_PX <= 0) {
         return;
     }
-    const int fit = IME_UI_FIT_HEIGHT_PX;
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+    /*
+     * ★ 语音页不参与这个预算：它没有"键行"，只有三个区段，高度由
+     *   voice_page_build() 按"状态行 + 圆形麦克风 + 操作行"自己分摊（候选栏在那一页
+     *   是隐藏的，而这里的公式会把它算成一行 —— 早先真机上语音页的圆形麦克风被顶到
+     *   288 px 就是这么来的）。行高保持主键盘最后算出来的值，圆和按钮跟着它走。
+     */
+    if (ctx->panel == LV_PINYIN_IME_PANEL_VOICE) {
+        return;
+    }
+#endif
 
-    const uint32_t key_rows = lv_obj_get_child_count(ctx->kb_rows);
+    const int fit = IME_UI_FIT_HEIGHT_PX;
+    const uint32_t key_rows = (uint32_t)kb->row_count;
+
     /* The 9-key pinyin row is counted only while it is actually on screen (it is
      * hidden when empty, see ime_ui_refresh_t9): the hidden flag is the single
      * source of truth, so a row that is not drawn never takes height away from
@@ -191,9 +188,9 @@ void ime_ui_apply_sizes(lv_pinyin_ime_ctx_t *ctx)
         return;
     }
     const uint32_t root_children = 1u + (t9_visible ? 1u : 0u) + 1u; /* cand + t9? + kb_rows */
-    const uint32_t fixed = 2u * IME_UI_PAD            /* root pad_all top+bottom */
-                         + 3u * (root_children - 1u)   /* root pad_row gaps */
-                         + 3u * (key_rows > 0 ? key_rows - 1u : 0u); /* kb_rows pad_row gaps */
+    const uint32_t fixed = 2u * IME_STYLE_ROOT_PAD          /* root pad_all top+bottom */
+                         + (uint32_t)IME_STYLE_ROOT_GAP * (root_children - 1u)
+                         + (uint32_t)IME_LAYOUT_ROW_GAP * (key_rows > 0 ? key_rows - 1u : 0u);
 
     int rh = (fit - (int)fixed) / (int)rows_total;
     if (rh < IME_UI_ROW_HEIGHT_MIN) {
@@ -202,19 +199,44 @@ void ime_ui_apply_sizes(lv_pinyin_ime_ctx_t *ctx)
         rh = IME_UI_ROW_HEIGHT_MAX;
     }
     IME_UI_ROW_HEIGHT_PX = rh;   /* future rows (rebuilds) start from the derived height */
+}
 
+int32_t ime_ui_keyboard_area_height(const lv_pinyin_ime_ctx_t *ctx)
+{
+    if (ctx == NULL || IME_UI_FIT_HEIGHT_PX <= 0) {
+        return 0;   /* 没有目标高度：布局引擎用 row_height_pref */
+    }
+    /*
+     * The keyboard area is what is left of the fit target once the widget's own
+     * padding is taken out. Only the voice page asks for this: there the rows
+     * container is the only visible child, so the number is exact. The main
+     * keyboard derives its row height in ime_ui_fit_row_height() instead (see the
+     * note there) and passes 0.
+     */
+    if (ctx->panel == LV_PINYIN_IME_PANEL_VOICE) {
+        return IME_UI_FIT_HEIGHT_PX - 2 * IME_STYLE_ROOT_PAD;
+    }
+    return 0;
+}
+
+void ime_ui_apply_sizes(lv_pinyin_ime_ctx_t *ctx)
+{
+    if (ctx == NULL || ctx->kb_rows == NULL) {
+        return;
+    }
+
+    ime_ui_fit_row_height(ctx, ime_ui_active_keyboard(ctx));
+
+    /* The candidate bar and the 9-key pinyin row share the key row height. */
     if (ctx->cand_bar != NULL) {
-        lv_obj_set_height(ctx->cand_bar, rh);
+        lv_obj_set_height(ctx->cand_bar, IME_UI_ROW_HEIGHT_PX);
     }
     if (ctx->t9_row != NULL) {
-        lv_obj_set_height(ctx->t9_row, rh);
+        lv_obj_set_height(ctx->t9_row, IME_UI_ROW_HEIGHT_PX);
     }
-    for (uint32_t r = 0; r < key_rows; r++) {
-        lv_obj_t *row = lv_obj_get_child(ctx->kb_rows, r);
-        if (row != NULL) {
-            lv_obj_set_height(row, rh);
-        }
-    }
+
+    /* 把新的行高落到已经建好的键上（语音页会整页重建，见 ime_ui_relayout_keyboard）。 */
+    ime_ui_relayout_keyboard(ctx);
 }
 
 void lv_pinyin_ime_set_fonts(const lv_font_t *big, const lv_font_t *small)
@@ -242,8 +264,6 @@ lv_obj_t *lv_pinyin_ime_create(lv_obj_t *parent)
         return NULL;
     }
 
-    update_unit_px(parent);
-
     ctx->obj = lv_obj_create(parent);
     ime_style_apply_root(ctx->obj);
     /*
@@ -270,10 +290,24 @@ lv_obj_t *lv_pinyin_ime_create(lv_obj_t *parent)
     lv_obj_remove_style_all(ctx->kb_rows);
     lv_obj_set_width(ctx->kb_rows, LV_PCT(100));
     lv_obj_set_height(ctx->kb_rows, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(ctx->kb_rows, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(ctx->kb_rows, 3, LV_PART_MAIN);
+    /*
+     * ★ 这里**没有** flex 布局：按键是 kb_rows 的直接子对象，位置和尺寸全部来自
+     *   ime_layout 算出来的矩形（行间距也由它给，不再靠容器的 pad_row）。
+     *   LV_SIZE_CONTENT 的高度仍由子对象的范围决定（calc_content_height 会算上手动
+     *   定位的子对象），所以"容器高度 = 各行之和"这条不变。
+     */
     lv_obj_remove_flag(ctx->kb_rows, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(ctx->kb_rows, LV_OBJ_FLAG_CLICKABLE);
+    /* 宽度/行高变化（第一次排版、旋转、缩放）时重新求解几何。 */
+    ime_ui_keyboard_watch_size(ctx);
+
+    /*
+     * ★ 先强制跑一次布局，再建键盘：按键用的是**绝对坐标**，而刚建出来的 kb_rows
+     *   宽度还是 0（父容器的 LV_PCT(100) 要等一次排版才算得出来）。不先排版的话
+     *   第一帧的键会全部挤在 0 宽度上、直到某次 SIZE_CHANGED 才恢复。
+     *   父对象此时已经由应用摆好（应用总是先建容器再建键盘），所以这一次排版是确定的。
+     */
+    lv_obj_update_layout(ctx->obj);
 
     ime_ui_rebuild_keyboard(ctx);
     ime_ui_apply_sizes(ctx);     /* fit 模式：把行高按目标总高分摊到每一行 */
@@ -495,32 +529,39 @@ void lv_pinyin_ime_dump(lv_obj_t *ime)
              (int)ctx->mode, (int)ctx->lang, (int)ctx->panel, IME_UI_UNIT_PX,
              (int)ime_session_ready(), ime_font_big() != NULL, ime_font_small() != NULL);
 
-    /* The key rows: objects and their first row's buttons say whether the
-     * keyboard was actually built and how big it came out. */
-    uint32_t rows = lv_obj_get_child_count(ctx->kb_rows);
-    IME_LOGI(TAG, "key rows: %u", (unsigned)rows);
-    for (uint32_t r = 0; r < rows; r++) {
-        lv_obj_t *row = lv_obj_get_child(ctx->kb_rows, r);
-        lv_obj_get_coords(row, &area);
-        uint32_t keys = lv_obj_get_child_count(row);
-        uint32_t visible = 0;
-        for (uint32_t k = 0; k < keys; k++) {
-            if (!lv_obj_has_flag(lv_obj_get_child(row, k), LV_OBJ_FLAG_HIDDEN)) {
-                visible++;
-            }
-        }
-        IME_LOGI(TAG, "  row %u: %u keys (%u visible) at y=%d size %dx%d", (unsigned)r,
-                 (unsigned)keys, (unsigned)visible, (int)area.y1,
-                 (int)lv_area_get_width(&area), (int)lv_area_get_height(&area));
+    /*
+     * 布局本身：这些数字就是"键盘为什么长这样"的答案。行高/标准键宽/网格宽度是求解
+     * 结果，后面那一行是自检（越界、重叠、间距、居中、尺寸超限）—— 全 0 才算正常。
+     * 真机上键盘看着不对时，先看这几行，而不是去数像素。
+     */
+    const ime_layout_metrics_t *m = &ctx->kb_metrics;
+    IME_LOGI(TAG, "layout: area %dx%d rows=%d row_h=%d unit=%d.%03dpx grid_x=%d grid_w=%d "
+                  "gap=%d/%d used_h=%d compact=%d tight=%d",
+             (int)m->width, (int)m->height, (int)m->row_count, (int)m->row_height,
+             (int)(m->unit_milli / 1000), (int)(m->unit_milli % 1000), (int)m->x_offset,
+             (int)m->content_width, (int)m->key_gap, (int)m->row_gap, (int)m->used_height,
+             (int)m->compact, (int)m->tight);
+    const ime_layout_report_t *rep = &ctx->kb_report;
+    IME_LOGI(TAG, "layout check: keys=%u oob=%u overlap=%u gap=%u align=%u w=%u h=%u -> %s",
+             (unsigned)rep->keys, (unsigned)rep->out_of_bounds, (unsigned)rep->overlaps,
+             (unsigned)rep->bad_gaps, (unsigned)rep->misaligned,
+             (unsigned)rep->width_violations, (unsigned)rep->height_violations,
+             rep->ok ? "ok" : "PROBLEM");
 
-        /* The first key's width and the row's left edge say whether the columns
-         * line up: every row should start at the same x with the same key width. */
-        if (keys > 0) {
-            lv_area_t key_area;
-            lv_obj_get_coords(lv_obj_get_child(row, 0), &key_area);
-            IME_LOGI(TAG, "    first key x=%d w=%d", (int)key_area.x1,
-                     (int)lv_area_get_width(&key_area));
-        }
+    /*
+     * 按键：全部平铺在 kb_rows 下（没有行容器），所以这里按"每个键自己的矩形"打印。
+     * 第一行顺带给出每个键的键面文字 —— 键宽和键面文字是两件最容易对不上的事。
+     */
+    const uint32_t keys = lv_obj_get_child_count(ctx->kb_rows);
+    IME_LOGI(TAG, "%u objects in the keyboard area (voice page: zones, not keys)",
+             (unsigned)keys);
+    for (uint32_t k = 0; k < keys; k++) {
+        lv_obj_t *btn = lv_obj_get_child(ctx->kb_rows, k);
+        lv_obj_get_coords(btn, &area);
+        const ime_key_t *key = lv_obj_get_user_data(btn);
+        IME_LOGI(TAG, "  [%u] %s at (%d,%d) %dx%d", (unsigned)k,
+                 (key != NULL && key->label != NULL) ? key->label : "-", (int)area.x1,
+                 (int)area.y1, (int)lv_area_get_width(&area), (int)lv_area_get_height(&area));
     }
 
     IME_LOGI(TAG, "candidates: %u shown, total %u, pinyin \"%s\"",

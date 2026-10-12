@@ -268,16 +268,30 @@ void ime_ui_build_candidates(lv_pinyin_ime_ctx_t *ctx)
 }
 
 /*
- * 一个候选按钮除文字之外占的横向宽度：s_cand_btn 的 pad_hor(4) × 2 加候选行
- * 的 pad_column(2)。量"这一屏能放几个"时要算进去，否则会多放一个、最后一个
- * 被裁掉半个字。
+ * 一个候选按钮除文字之外占的横向宽度：s_cand_btn 的 pad_hor(4) × 2。
+ * 量"这一屏能放几个"时要算进去，否则会多放一个、最后一个被裁掉半个字。
+ *
+ * ★ 候选行自身的 pad_column（按钮**之间**的间距）不在这里：它不占按钮宽度，得按
+ *   "n-1 个间距"单独从可分配宽度里扣（见 cand_measure）。早先把它按"每个按钮 2 px"
+ *   混进 chrome 里，于是每个候选再分一份剩余宽度之后，整行正好超出右边界 ——
+ *   九键打满一屏（8 个候选）时最后一个候选会被切掉（host_ui_render 的 fit 用例报的
+ *   就是这个）。
  */
-#define IME_UI_CAND_CHROME 10
+#define IME_UI_CAND_CHROME 8
+
+/** 候选行按钮之间的间距（= cand_row 的 pad_column）。 */
+#define IME_UI_CAND_GAP 2
 
 typedef struct {
     size_t count;                     /* 这一屏放几个 */
     int    pct[IME_UI_CAND_MAX];      /* 每个候选按钮占候选行**内容宽度**的百分比 */
 } cand_fit_t;
+
+/** LVGL 把 LV_PCT(p) 换算成像素的方式（向下取整），这里要照着算才验得准。 */
+static int cand_pct_to_px(int pct, int base)
+{
+    return (int)(((int64_t)base * pct) / 100);
+}
 
 /**
  * 量出这一屏放几个候选、各自占多宽。
@@ -293,8 +307,11 @@ typedef struct {
  *
  * ★ 为什么给的是**百分比**而不是像素：候选行的宽度要等布局跑完才准（条内的翻页键、
  *   控件宽度都可能刚变过），按"量的时候那个宽度"算像素，最后几个候选就会差出十几
- *   像素、探出右边界。百分比在布局时按真实宽度换算，且各项之和 ≤ 100%，永远不会
- *   超界。
+ *   像素、探出右边界。百分比在布局时按真实宽度换算。
+ *
+ * ★ 百分比**取整之后**还要按像素复核一遍（cand_fit_check）：各项之和 ≤ 100% 并不等于
+ *   像素上放得下 —— 每个百分比各自向下取整会丢掉不足 1 px，但它们之间的间距是实打实
+ *   的 2 px。复核不通过就把最宽的那一项削 1%，直到真的放得下。
  */
 static void cand_measure(lv_pinyin_ime_ctx_t *ctx, cand_fit_t *fit)
 {
@@ -317,6 +334,8 @@ static void cand_measure(lv_pinyin_ime_ctx_t *ctx, cand_fit_t *fit)
         if (text == NULL) {
             break;
         }
+        /* 按钮之间的间距：放第 n 个（n ≥ 1）时要先留出它前面那个间距 */
+        const int gap = (n > 0) ? IME_UI_CAND_GAP : 0;
         /* lv_text_get_width() 在 LVGL 9 是 private 的，公开入口是 get_size */
         lv_point_t sz = { 0, 0 };
         lv_text_get_size(&sz, text, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
@@ -324,11 +343,11 @@ static void cand_measure(lv_pinyin_ime_ctx_t *ctx, cand_fit_t *fit)
         if (wi > row_w) {
             wi = row_w;         /* 单个候选就比整行宽：让它自己省略号，别撑破 */
         }
-        if (n > 0 && wi > avail) {
+        if (n > 0 && wi + gap > avail) {
             break;
         }
         w[n] = wi;
-        avail -= wi;
+        avail -= wi + gap;
         n++;
     }
     if (n == 0) {
@@ -346,6 +365,27 @@ static void cand_measure(lv_pinyin_ime_ctx_t *ctx, cand_fit_t *fit)
         fit->pct[i] = pct;
     }
     fit->count = n;
+
+    /*
+     * ★ 像素复核：百分比各自向下取整丢掉的零头不占地方，但按钮之间的间距是实打实的，
+     *   所以"各项之和 ≤ 100%"并不保证放得下。放不下就削最宽的那一项（1% = 2~3 px），
+     *   最多削到 n 项各 1% —— 循环有界，且削完一定收得回来。
+     */
+    for (;;) {
+        int px = 0;
+        size_t widest = 0;
+        for (size_t i = 0; i < n; i++) {
+            px += cand_pct_to_px(fit->pct[i], row_w);
+            if (fit->pct[i] > fit->pct[widest]) {
+                widest = i;
+            }
+        }
+        px += (int)(n > 0 ? (n - 1) * IME_UI_CAND_GAP : 0);
+        if (px <= row_w || fit->pct[widest] <= 1) {
+            break;
+        }
+        fit->pct[widest]--;
+    }
 }
 
 void ime_ui_refresh_candidates(lv_pinyin_ime_ctx_t *ctx)

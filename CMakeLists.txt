@@ -29,6 +29,8 @@ set(LV_PINYIN_IME_SRCS
     "src/ui/lv_pinyin_ime.c"
     "src/ui/lv_pinyin_ime_cand.c"
     "src/ui/lv_pinyin_ime_kb.c"
+    "src/ui/ime_layout.c"
+    "src/ui/ime_keymaps.c"
 "src/ui/mic_icon.c"
     "src/ui/lv_pinyin_ime_style.c"
 )

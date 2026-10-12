@@ -226,8 +226,8 @@ void ime_style_apply_root(lv_obj_t *root)
     lv_obj_remove_style_all(root);
     lv_obj_set_style_bg_color(root, IME_COLOR_BG, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(root, 2, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(root, 3, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(root, IME_STYLE_ROOT_PAD, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(root, IME_STYLE_ROOT_GAP, LV_PART_MAIN);
 }
 
 void ime_style_apply_font(lv_obj_t *obj, const lv_font_t *font)
