@@ -7,6 +7,11 @@
 
 > 全文档禁止使用 emoji。`⌨` `⇧` `⌫` `⏎` `✓` 等以 Unicode 几何符号或内联 SVG 实现。
 
+> 本文档描述**完整的布局规范**，包含尚未实现的模式。与双拼、模糊音相关的条目
+> （例如「`分词` 在双拼模式下自动隐藏」）目前只有规范、没有实现：双拼与模糊音属
+> 「规划中」，见 [README 的功能与现状](../README_zh-cn.md#功能与现状)。当前实际可用的
+> 是中文/英文两种语言模式与 26 键/九键两种键盘。
+
 ---
 
 ## 1. 26 键中文拼音布局（P0）
@@ -212,7 +217,7 @@ P0 主键盘 ──[ 符 / ?123 ]──►  P1 数字 + 常用符号混合面板
 └──────────────────────────────────────────────────────┘
 ```
 
-P3 符号集按分类页签组织，键位表在 `src/ui/lv_pinyin_ime_panel.c` 中以静态数组给出。
+P3 符号集按分类页签组织，键位表在 `src/ui/lv_pinyin_ime_kb.c` 中以静态数组给出。
 
 ---
 
@@ -277,8 +282,8 @@ P3 符号集按分类页签组织，键位表在 `src/ui/lv_pinyin_ime_panel.c` 
 
 | 文档概念 | C 侧落点 |
 | --- | --- |
-| P0 键位表 | `src/ui/lv_pinyin_ime_k26.c` 的静态按键描述表 |
-| 九键键位表 | `src/ui/lv_pinyin_ime_k9.c` |
-| P1/P2/P3 | `src/ui/lv_pinyin_ime_panel.c` |
+| P0 键位表 | `src/ui/lv_pinyin_ime_kb.c` 的静态按键描述表 |
+| 九键键位表 | `src/ui/lv_pinyin_ime_kb.c` |
+| P1/P2/P3 | `src/ui/lv_pinyin_ime_kb.c` |
 | 候选栏 + 拼音浮窗 | `src/ui/lv_pinyin_ime_cand.c` |
 | 模式 / 面板状态 | `src/core/ime_session.c` 与 `lv_pinyin_ime_types.h` 中的枚举 |

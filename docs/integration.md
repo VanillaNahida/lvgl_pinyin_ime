@@ -1,49 +1,75 @@
 # 组件接入说明
 
+把 `lvgl_pinyin_ime` 作为组件接进你自己的 ESP-IDF 工程：声明依赖 → 配分区表 →
+选词库来源 → 选字体来源 → 写少量应用代码。
+
+只想先跑通示例，看 [usage.md](./usage.md)；键位与 API 细节见
+[keymap.md](./keymap.md) 与 [include/lvgl_pinyin_ime/](../include/lvgl_pinyin_ime/)。
+
+---
+
 ## 1. 环境
 
 | 项 | 值 |
 | --- | --- |
-| ESP-IDF | 6.1.0（`D:\Espressif\EIM\v6.1\esp-idf`） |
+| ESP-IDF | 6.1（路径换成你自己的，下同） |
 | LVGL | 9.5（组件仓库 `lvgl/lvgl`，首次构建联网拉取到 `managed_components/`） |
-| 目标芯片 | ESP32-S3-N16R8（主）、ESP32-S31（正式支持）、ESP32-P4（顺带支持） |
-| 主机端 Python | `D:\Espressif\EIM\tools\idf-python\3.11.2\python.exe` |
-| Node.js | LTS（`lv_font_conv` 依赖，需 `winget install OpenJS.NodeJS.LTS`） |
+| 目标芯片 | ESP32-S3（主）、ESP32-P4；ESP32-S31 为 preview |
+| 主机端 Python | 生成词库/字体用，一律放在 `tools/venv`（`tools/setup_env.ps1` 创建） |
+| Node.js | LTS，`lv_font_conv` 依赖 |
+
+---
 
 ## 2. 作为组件引入
 
 ### 2.1 本仓库内的示例工程
 
-`examples/k26_k9_demo/CMakeLists.txt` 通过 `EXTRA_COMPONENT_DIRS` 直接把仓库根目录
-注册为一个 IDF 组件（ESP-IDF 的 `__project_component_dir()` 支持"目录自身即为组件"）：
+`examples/k26_k9_demo/CMakeLists.txt` 通过 `EXTRA_COMPONENT_DIRS` 把仓库根目录注册为
+一个 IDF 组件，同时也注册了 vendored 的引擎组件：
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
-set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../..")
+set(EXTRA_COMPONENT_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}/../.."
+    "${CMAKE_CURRENT_LIST_DIR}/../../src/third_party/libgooglepinyin"
+)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(k26_k9_demo)
 ```
 
+注意 `src/third_party/libgooglepinyin` 必须一起注册，否则 `REQUIRES libgooglepinyin`
+会解析失败。
+
 ### 2.2 独立工程引入
 
+在你的工程里让 `main` 依赖它。`main/idf_component.yml`：
+
 ```yaml
-# main/idf_component.yml
 dependencies:
   idf: ">=5.3"
   lvgl/lvgl: "^9.5"
   lvgl_pinyin_ime:
-    version: "*"
+    version: "*"          # 已发布到组件仓库时
+    # 开发期用本地路径覆盖，二选一：
+    # override_path: "../../lvgl_pinyin_ime"
 ```
 
-或使用本地路径覆盖（开发期推荐）：
+`main/CMakeLists.txt`：
 
-```yaml
-dependencies:
-  lvgl_pinyin_ime:
-    override_path: "../../lvgl_pinyin_ime"
+```cmake
+idf_component_register(
+    SRCS "main.c"
+    INCLUDE_DIRS "."
+    REQUIRES lvgl lvgl_pinyin_ime
+)
 ```
 
 然后 `idf.py reconfigure` 会拉取/链接组件。
+
+> 用 `override_path` 指向本仓库时，`libgooglepinyin` 是仓库内的子组件，组件管理器会
+> 一并解析。若直接 copy 本仓库到工程里，记得连同 `src/third_party/` 一起带。
+
+---
 
 ## 3. 分区表
 
@@ -59,21 +85,22 @@ usr,      data, fat,     ,         0x100000,
 factory,  app,  factory, ,         0x800000,
 ```
 
-合计约 13.6 MB < 16 MB。
+合计约 13.6 MB < 16 MB。`partitions/ime_8mb.csv`：4 MB app、无独立 font 分区、
+字体内嵌为 C 数组。
 
-`partitions/ime_8mb.csv`：4 MB app、无独立 font 分区、字体内嵌为 C 数组。
-
-工程侧配置：
+工程侧配置（示例工程的 `sdkconfig.defaults` 中该值为 `"../../partitions/ime_16mb.csv"`，
+路径**相对于工程目录**，所以直接指向仓库内的分区表，不必复制文件）：
 
 ```
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/ime_16mb.csv"
 ```
 
-（本仓库示例工程的 `sdkconfig.defaults` 中该值为 `"../../partitions/ime_16mb.csv"`。）
+> 分区名 `dict` / `font` / `usr` 目前取自代码里的常量（`src/data/ime_dict.c`、
+> `src/data/ime_font.c`），`Kconfig` 里的 `LV_PINYIN_IME_DICT_PARTITION` 等同名选项
+> 尚未接线。分区表里的名字要与代码一致。
 
-`CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` 相对于工程目录，示例工程因此直接写
-`"../../partitions/ime_16mb.csv"` 指向仓库内的分区表，不再复制文件。
+---
 
 ## 4. 词库装载
 
@@ -81,86 +108,65 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/ime_16mb.csv"
 
 | 取值 | 路径来源 | 说明 |
 | --- | --- | --- |
-| `PARTITION`（默认） | `esp_partition_mmap()` + 自写只读 VFS | 暴露为 `/ime/dict_pinyin.dat`；分区不存在时自动退回 EMBEDDED 副本 |
+| `PARTITION`（默认） | `esp_partition_mmap()` + 自写只读 VFS | 暴露为 `/dict/dict_pinyin.dat`；分区不存在时自动退回内嵌副本 |
 | `SDCARD` | `CONFIG_LV_PINYIN_IME_DICT_SD_PATH` | 默认 `/sdcard/dict_pinyin.dat` |
-| `EMBEDDED` | 链接进 app 的二进制（`target_add_binary_data`） | 拷贝到 PSRAM 后经同一 VFS 暴露；8 MB 方案使用 |
+| `EMBEDDED` | 链接进 app 的二进制（`target_add_binary_data`） | 拷进 PSRAM 后经同一 VFS 暴露；8 MB 方案使用 |
 
-词库不下载官方 `dict_pinyin.dat`：仓库内置上游原始词表，由仓库内的 dictbuilder
-现场生成，结果可复现（1 073 858 B）：
+词库不下载官方 `dict_pinyin.dat`：仓库内置上游原始词表，由仓库内的 dictbuilder 现场
+生成，结果可复现（1 073 858 B）：
 
 ```powershell
-cd d:\Codes\lvgl_pinyin_ime
+cd <仓库根>
 python tools\gen_dict.py            # 首次会自动编译 generated/dictbuilder
 ```
 
 烧写词库与字体分区（分区表由 `idf.py flash` 写入，内容用 parttool）：
 
 ```powershell
-& "D:\Espressif\EIM\v6.1\esp-idf\export.ps1"
-powershell -ExecutionPolicy Bypass -File tools\flash_dict.ps1 -Port COM17 -Dict -Font
+& "<你的 IDF 路径>\export.ps1"
+powershell -ExecutionPolicy Bypass -File tools\flash_dict.ps1 -Port COM5 -Dict -Font
 ```
+
+> SD 卡**扩展词库**（在大词库之外再挂一份自定义词表）尚未落地：`Kconfig` 里的
+> `LV_PINYIN_IME_EXT_DICT_ENABLE` / `LV_PINYIN_IME_EXT_DICT_PATH` 目前没有对应代码，
+> 格式约定见 [dict_format.md](./dict_format.md) 第 1 节（属规划中的格式）。
+
+---
 
 ## 5. 字体
 
 字体有两种来源，由 `CONFIG_LV_PINYIN_IME_FONT_SRC` 选择：
 
 | 选项 | 行为 | 适用 |
-|---|---|---|
-| `EMBEDDED`（默认） | `generated/lv_font_ime_20.c` / `_16.c` 直接编进 app，直接引用 `lv_font_ime_20` / `lv_font_ime_16` | 开箱即用，**不用烧任何分区** |
+| --- | --- | --- |
+| `EMBEDDED`（默认） | `generated/lv_font_ime_20.c` / `_16.c` 直接编进 app，引用 `lv_font_ime_20` / `lv_font_ime_16` | 开箱即用，**不用烧任何分区** |
 | `PARTITION` | `font_partition.bin` 烧到 `font` 分区，运行时用 `lv_binfont_create_from_buffer()` 加载 | 想省 app 空间、或字体需要单独升级 |
 
 ### 5.1 EMBEDDED（默认）
 
-`tools/gen_font.py --format c` 生成两个 C 文件，每个文件里是 `glyph_bitmap`
-字节数组 + 一个以文件名命名的 `lv_font_t`。CMake 把它们加进源码列表，所以
-**字体在固件里，键盘一上电就能显示汉字**，没有文件系统参与，也就没有"字体
-加载失败 → 候选栏全是方框"这种静默故障。
+`tools/gen_font.py --format c` 生成两个 C 文件，每个文件里是 `glyph_bitmap` 字节数组
+加一个以文件名命名的 `lv_font_t`。CMake 把它们加进源码列表，所以**字体在固件里，
+键盘一上电就能显示汉字**，没有文件系统参与，也就没有"字体加载失败 → 候选栏全是方框"
+这种静默故障。
 
 实测体积（GB2312 + UI + ASCII，7 549 字，均 2 bpp）：
 
-| 字体 | 规格 | 位图数据 | 最大 `bitmap_index` |
-|---|---|---|---|
-| `lv_font_ime_20` | 20 px / 2 bpp | 约 675 KB | 691 179 |
-| `lv_font_ime_16` | 16 px / 2 bpp | 约 437 KB | 447 913 |
-
-两者合计使 app 约 **2.9 MB**（8 MB app 分区）。
-
-#### ⚠️ lv_font_conv 1.5.2 生成 LVGL 8 格式，`gen_font.py` 会补三处
-
-上游 `lv_font_conv` 的最新版就是 1.5.2，它按 **LVGL 8** 的结构体写 C 文件，
-直接喂给 LVGL 9 会**一个字都画不出来**（不是方框，是空白）。`gen_font.py`
-在生成后修正下面三点，改动都有注释说明原因：
-
-| 差异 | LVGL 8 / 生成器 | LVGL 9 | 不修的后果 |
-|---|---|---|---|
-| `lv_font_fmt_txt_dsc_t` 新字段 | 只有到 `bitmap_format` | 多了 `stride`、`are_glyphs_dynamic_loaded` | 后者非 0 时 LVGL 把 `glyph_bitmap` 当加载器对象 → 崩溃 |
-| `lv_font_t` 新字段 | 无 | `static_bitmap` | `lv_font_get_glyph_static_bitmap()` 返回 NULL 并告警 |
-| `bitmap_format` 取值 | 生成器对未压缩字体也写 `1` | `{PLAIN=0, COMPRESSED=1}` | 见下 |
-
-关于 `bitmap_format` 有个反直觉的点：生成器**默认做 RLE 压缩**，此时写
-`1`；LVGL 9 里 `COMPRESSED` 正好也是 `1`，所以**原样保留才是对的**。
-`gen_font.py` 生成 C 时显式加 `--no-compress`，让位图变成裸数据、格式写 `0`，
-只比压缩大约大 25%，但省掉了对压缩解码路径的依赖。
-
-> 因此 **`CONFIG_LV_FONT_FMT_TXT_LARGE` 必须保持关闭**：`lv_font_conv` 只会写
-> 紧凑的 8 字节 glyph 描述符（`bitmap_index:20`），打开大格式后 LVGL 按 12 字节
-> 步长遍历 → 全部字形为空。它同时也是 1 MB 位图上限的来源，`gen_font.py` 会在
-> 生成时校验并直接报错。`src/data/ime_font.c` 里有编译期 `#error` 拦住误开。
+| 字体 | 规格 | 位图数据 |
+| --- | --- | --- |
+| `lv_font_ime_20` | 20 px / 2 bpp | 约 675 KB |
+| `lv_font_ime_16` | 16 px / 2 bpp | 约 437 KB |
 
 ### 5.2 PARTITION（可选）
 
-字体分区存 `font_partition.bin`，即 `lv_font_ime_20.bin`（候选/上屏正文）
-+ `lv_font_ime_16.bin`（键面与拼音浮窗）的合并镜像，实测 2 413 KB。
+字体分区存 `font_partition.bin`，即 `lv_font_ime_20.bin` + `lv_font_ime_16.bin` 的合并
+镜像。运行时由 `src/data/ime_font.c` 加载：`esp_partition_mmap()` 拿到首字体长度后，
+把镜像拷进 PSRAM，再交给 `lv_binfont_create_from_buffer()`。
 
-运行时由 `src/data/ime_font.c` 加载：`esp_partition_mmap()` 拿到首字体长度后，
-把字体镜像拷进 PSRAM，再交给 `lv_binfont_create_from_buffer()`。
-
-> ⚠️ 选 PARTITION 时**必须打开 `CONFIG_LV_USE_FS_MEMFS`**（`sdkconfig.defaults`
-> 里已设好 `CONFIG_LV_FS_MEMFS_LETTER=65`，即盘符 `A`）。这个 API 内部走 LVGL
-> 文件系统，而 `lv_binfont_create(path)` 会把路径首字符当盘符解析——本组件给
-> libgooglepinyin 装的只读 VFS 是 **ESP-IDF VFS**，LVGL 看不见，所以路径方式
-> 永远打不开文件，只会让字体静默加载失败、候选栏显示方框。
-> 忘了开这个选项时，`ime_font.c` 会在编译期用 `#error` 直接拦住。
+必须同时打开 `CONFIG_LV_USE_FS_MEMFS`（示例 `sdkconfig.defaults` 里已设
+`CONFIG_LV_FS_MEMFS_LETTER=65`，即盘符 `A`）。这个 API 内部走 LVGL 文件系统，
+而 `lv_binfont_create(path)` 会把路径首字符当盘符解析 —— 本组件给 libgooglepinyin
+装的只读 VFS 是 ESP-IDF VFS，LVGL 看不见，所以路径方式永远打不开文件，只会让字体
+静默加载失败、候选栏显示方框。忘了开这个选项时，`ime_font.c` 会在编译期 `#error` 拦住。
 
 ### 5.3 生成流程
 
@@ -172,32 +178,13 @@ powershell -ExecutionPolicy Bypass -File tools\setup_env.ps1   # 只需一次，
 .\tools\venv\Scripts\python.exe tools\check_charset.py         # 校验 UI 用到的字都在字表里
 ```
 
-`check_charset.py` 会扫 `src/ui/*.c` 的字符串字面量和 `LV_SYMBOL_*`，**按下
-LVGL 的规则遍历生成字体的 cmap**，报出任何"界面会画但字体里没有"的字符。
-它同时检查两件事，因为只查一件会互相掩盖：
+`check_charset.py` 会扫 `src/ui/*.c` 的字符串字面量和 `LV_SYMBOL_*`，按下 LVGL 的
+规则遍历生成字体的 cmap，报出任何"界面会画但字体里没有"的字符。它同时检查两件事，
+因为只查一件会互相掩盖：字符在 `generated/charset.txt` 里吗；以及字符在**生成出来的
+字体**里吗（`lv_font_conv` 会静默丢掉源 TTF 里没有字形的符号）。
 
-1. 字符在 `generated/charset.txt` 里吗；
-2. 字符在**生成出来的字体**里吗——`lv_font_conv` 会**静默丢掉**源 TTF 里没有
-   字形的符号。
-
-> 实测：`DreamHanSansSC-W17.ttf` 里 **没有** U+232B `⌫` 和 U+2328 `⌨`，
-> 所以退格键与键盘切换键的文案改成 `←` 与 `abc`。`tools/check_charset.py`
-> 就是为发现这类问题写的：字表里有、字体里没有 = 屏上空白。
-
-#### 空格必须单独用 `--range 32` 指定
-
-`gen_charset.py` 是**一行一个字符**写 `charset.txt` 的，所以空格 U+0020 落下
-来就是一个空行，读回时被 `split()` 丢掉。字表里没有空格 → 字体 cmap 从
-U+0021 开始 → LVGL 在**每个空格处**找不到字形，于是画它的"缺字方框"（那个
-细边框小方块），输入框占位文字和上屏文本里都会出现。
-
-因此 `gen_font.py` 生成时固定加 `--range 32`（`--range` 不按空白切分，
-`--symbols` 会）。修好后 cmap 与 LVGL 自带字体一致：`range_start = 32,
-range_length = 95`。
-
-字表默认 **GB2312 + UI 符号 + ASCII（7 549 字）**。引擎理论上还能输出 9 716 个
-GB2312 之外的汉字，全量字表会让 20 px 字体溢出 1 MB 偏移上限，因此默认不含
-（这些字会显示为缺字方框）。需要时：
+字表默认 **GB2312 + UI 符号 + ASCII（7 549 字）**。字表里没有的字会显示为缺字方框；
+需要更全的字表时：
 
 ```powershell
 .\tools\venv\Scripts\python.exe tools\gen_charset.py --with-extra-hanzi
@@ -210,99 +197,22 @@ GB2312 之外的汉字，全量字表会让 20 px 字体溢出 1 MB 偏移上限
 .\tools\venv\Scripts\python.exe tools\inspect_font.py generated\lv_font_ime_20.bin
 ```
 
-### 5.4 键盘外观
+### 5.4 三个必须记住的约束
 
-按键是**方角小圆角**，不是胶囊形。`src/ui/lv_pinyin_ime_style.c` 里
-`IME_KEY_RADIUS` 为 4 px：LVGL 会把圆角钳到短边的一半，26 px 宽的键一旦超过
-13 px 就会被画成椭圆。键高由 `IME_UI_ROW_HEIGHT`（34 px）决定。
+**`CONFIG_LV_FONT_FMT_TXT_LARGE` 必须保持关闭。** `lv_font_conv` 只会写紧凑的 8 字节
+glyph 描述符（`bitmap_index:20`）；打开大格式后 LVGL 按 12 字节步长遍历，结果**一个字
+都画不出来**（不是方框，是空白）。它同时也是 1 MB 位图上限的来源，`gen_font.py` 会在
+生成时校验并直接报错，`src/data/ime_font.c` 里有编译期 `#error` 拦住误开。
 
-按键样式：白底 + `IME_KEY_BORDER`（1 px）`#B6BDC8` 细边框，浮在 `#D3D8E0` 的
-深一档底板上，所以每个键读起来是独立的按钮而不是一整片。
+**空格必须单独用 `--range 32` 指定。** `gen_charset.py` 是一行一个字符写 `charset.txt`
+的，空格落下就是一个空行，读回时被丢掉。字表里没有空格 → cmap 从 U+0021 开始 →
+LVGL 在每个空格处画缺字方框。因此 `gen_font.py` 生成时固定加 `--range 32`。
 
-#### 键宽由 flex 权重决定，不是像素
+**上面两点 `gen_font.py` 已经处理好了**，列在这里是为了在你想改工具链时知道它们存在。
 
-每个键用 `lv_obj_set_flex_grow(btn, width_u)` 而不是像素宽度，行内按键按权重
-瓜分整行宽度。这样做的原因有两个，都是踩过的坑：
+---
 
-1. **两端的留白**。按像素给宽度时，12 个键加起来只有 279 px，而行框有 316 px，
-   剩下的 37 px 就变成左右空白。权重分配让每行**恰好填满**。
-2. **间隙不均匀**。逐个算像素宽度再指望它们加起来等于行宽，结果是每个键后面的
-   间隙都不一样（实测一个是 8 px、其余 3 px）。权重分配没有这个问题。
-
-26 键的字母键是 0.9u、外侧功能键（符 / ⇧ / 分词 / ⌫ / ⏎）是 1.5u。把外侧键
-做得比字母宽，既符合参考图，也正好把这 12 个单位填满。
-
-> ⚠️ `ime_style_apply_key()` 的第一句是 `lv_obj_remove_style_all()`，LVGL 这个
-> 调用**连对象上的本地属性一起清掉**。所以必须先套样式、再设尺寸/权重，反过来
-> 宽度会被丢掉、按键退化成按内容撑开（每个键宽窄不一）。候选键同理。
-
-#### 特殊键用 LVGL 自带符号字体
-
-退格、回车、确认、键盘切换、Shift 都用 LVGL 的符号字形
-（`LV_SYMBOL_BACKSPACE` / `_NEW_LINE` / `_OK` / `_KEYBOARD` / `_UP`），与
-LVGL 自带 keyboard 的做法一致。这些字形位于 FontAwesome 私用区，由内置
-Montserrat 字体提供，**子集化的中文字体里没有**，所以
-`src/ui/lv_pinyin_ime_kb.c` 的 `key_caption_font()` 给这些键的标签用
-`LV_FONT_DEFAULT`，其余标签用 IME 字体。
-
-> 不要把符号加进生成的 CJK 字体：字表来自源 TTF，里面根本没有这些字形
-> （`tools/check_charset.py` 会跳过 `LV_SYMBOL_*`）。
-
-#### 九键（T9）的拼音候选必须是真的拼音
-
-九键把数字串切分成音节，候选拼音行的每一项都应该是**真实存在的拼音**。这里踩过
-两个坑，都会在屏幕上显示不可拼读的候选（例如按下 `32` 出现 `e'a`）：
-
-1. **按前缀匹配音节**。`seg()` 原本拿缓冲的一个**前缀**去和音节表比，于是
-   `"32"` 会匹配到某个"数字串以 32 开头"的更长音节，凭空造出 `ea`。
-   音节表里只有完整音节，所以**按音节自身的完整长度比较**才是对的。
-2. **把单字母音节串起来**。词表里确实有 `锕 a`、`唔 n`、`呣 m` 这类单字母音节，
-   单用是合法的，但 `32` 可以被读成 `e`+`a`（`e` 在 3 键、`a` 在 2 键）——
-   键位读法没错，可没人会这么打字。所以**单字母音节只在它独占整个缓冲时才允许**。
-
-`ime_t9_is_valid()` 按音节表校验一串拼音；`host_core_test` 用它做两件事：逐条检查
-多组数字串产生的每个候选，以及校验器自身（`da`/`xi'an` 通过，`ea`/`da'ea` 拒绝）。
-这组断言有 60 项，就是防这两个坑回归的。
-
-音节表本身（`src/generated/ime_t9_syllables.h`，413 条）由 `tools/gen_t9_table.py`
-从引擎自己的词表生成，所以"内置拼音表"和词典永远一致，不会出现引擎不认识的拼写。
-
-#### 空格键
-
-有拼音缓冲或候选列表时，空格**上屏当前高亮的候选词**；半途未成词则把字母原样
-送出；完全没有组合时插入一个真正的空格。见 `src/ui/lv_pinyin_ime.c` 的
-`IME_KEY_SPACE`。
-
-26 键第 4 行顺序为 `?123 | ⌨ | 空格(4u) | 中 | ✓`：空格居中在拇指位置并与上方
-字母列对齐，两个模式键留在两角。
-
-#### 中英切换键
-
-只显示**当前生效**的一侧，单字：中文 `中`、英文 `英`。它是 `key_label()` 里的
-动态文案而不是键表条目，切换语言会重建键盘。
-
-## 5.5 主机端渲染检查（不用烧板看布局）
-
-`test_apps/host_ui_render` 用真实 LVGL 把 IME 画出来并导出 PPM，用来在没有硬件时
-确认键位布局与可见性：
-
-```powershell
-cmake -S test_apps/host_ui_render -B build/host_ui_render -G Ninja
-cmake --build build/host_ui_render
-.\build\host_ui_render\host_ui_render.exe build\ime_k26.ppm k26   # 也可 k9 / p1 / en
-```
-
-输出包含根对象坐标、各键行的位置与按钮数，以及 `visible children` 计数。
-
-## 6. 扩展词库（SD 卡，可选）
-
-- 开关：`CONFIG_LV_PINYIN_IME_EXT_DICT_ENABLE`
-- 路径：`CONFIG_LV_PINYIN_IME_EXT_DICT_PATH`，默认 `/sdcard/ime_ext.bin`
-- 生成：`tools/gen_extdict.py`，格式见 [dict_format.md](./dict_format.md)
-
-拔出 SD 卡不影响基本功能（装载失败时只打印警告并继续）。
-
-## 7. 应用侧最小用法
+## 6. 应用侧最小用法
 
 ```c
 #include "lvgl_pinyin_ime/lv_pinyin_ime.h"
@@ -318,122 +228,52 @@ lv_pinyin_ime_set_lang(ime, LV_PINYIN_IME_LANG_CN);
 lv_obj_add_event_cb(ime, on_ime_ready, lv_pinyin_ime_event_ready(), NULL);
 ```
 
-### 7.1 示例工程的屏幕（ST7789）
+以下三者在建控件**之前**调用（都是建控件时读取的全局状态）：
 
-`examples/k26_k9_demo` 已接好 ST7789（SPI 接口，320 x 240 横向），使用
-ESP-IDF 自带的 `esp_lcd` 驱动，未引入额外部件。引脚与参考工程
-`ESP32_MusicPlayer_V4` 一致：
+| 函数 | 作用 |
+| --- | --- |
+| `lv_pinyin_ime_set_fit_height(px)` | 按目标高度自适应行高，键盘占屏幕一半时最省心 |
+| `lv_pinyin_ime_set_row_height(px)` | 需要固定行高时使用 |
+| `lv_pinyin_ime_set_fonts(big, small)` | 用应用自己的中文字体，字更全；`NULL` 表示该尺寸沿用内置 |
 
-| 信号 | GPIO | 说明 |
-| --- | --- | --- |
-| SCLK | 12 | SPI2 时钟 |
-| MOSI | 11 | SPI2 数据 |
-| MISO | 13 | 复用给后面的 XPT2046 触摸 |
-| CS | 10 | 屏幕片选 |
-| DC | 9 | 数据/命令 |
-| RST | 14 | 复位 |
-| BL | 4 | 背光，低电平点亮 |
+用自带字体时**不要**把 LVGL 的符号字形（`LV_SYMBOL_BACKSPACE` / `_NEW_LINE` / `_OK` /
+`_KEYBOARD` / `_UP`，位于 FontAwesome 私用区）加进生成的中文字体：字表来自源 TTF，
+里面没有这些字形。退格、回车等特殊键的标签走 LVGL 自带符号字体，其余标签走 IME 字体，
+组件已按此处理。
 
-其他参数：SPI 时钟 27 MHz、像素格式 RGB565、元素顺序 BGR、
-`esp_lcd_panel_invert_color(false)`（对应参考工程的 `TFT_INVERSION_OFF`）。
-面板原生 240 x 320，通过 `esp_lcd_panel_swap_xy(true)` 转成 320 x 240 横向；
-若实际成像镜像或上下颠倒，调整 `main.c` 中 `esp_lcd_panel_mirror()` 的两个参数。
+其余公开 API（`lv_pinyin_ime_reset` / `_show` / `_hide` / `_set_panel` / `_dump`、
+事件码 `lv_pinyin_ime_event_cand_changed()` 等）见
+[include/lvgl_pinyin_ime/lv_pinyin_ime.h](../include/lvgl_pinyin_ime/lv_pinyin_ime.h)。
+语音输入见 [voice.md](./voice.md)。
 
-LVGL 与屏幕之间直接用 `lv_display_set_flush_cb()` + `esp_lcd_panel_draw_bitmap()` 对接，
-传输完成回调里调用 `lv_display_flush_ready()`，渲染缓冲固定放在内部 RAM
-（SPI DMA 不能从 PSRAM 取数）。
+---
 
-显示缓冲用 `lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565_SWAPPED)`：
-ST7789 是大端器件，LVGL 默认按小端渲染，不切这一下颜色就是错乱的（DMA 送出去
-的字节顺序反了），文字抗锯齿边缘也会串色。
-
-XPT2046 触摸（CS = 15，IRQ = 40 不接）共用这条 SPI 总线，由
-`main/touch_xpt2046.c` 轮询读取，注册为 LVGL 的指针输入设备（2 MHz、SPI mode 0）。
-读出的 19 个字节按「命令字节 + 哑字节」成组，每组拼成 16 位后右移 3 位取 12 位结果；
-**拼装顺序必须与 Arduino 的 `SPI.transfer16()` 一致**（哑字节在高位），
-否则会把上一次转换的尾部位混进来，读出不可能是 12 位的值（>4095）。
-判据：正确的拼装里，高字节的最高位（转换的 busy 位）恒为 0。
-`touch_xpt2046_init()` 里带一次自检：若 19 个字节全相同（0x00/0xFF），说明控制器没有
-驱动 MISO，直接给出接线提示；否则打印前 4 个字节，说明总线是通的。
-
-`main/touch_cal.c` 是校准向导，串口敲 `c` 启动、`x` 取消，四点采样后线性外推到屏幕
-四边，结果写入 NVS 的 `touch` 命名空间（`xl`/`xr`/`yt`/`yb` 加 `ver` 版本号），开机自动读回。
-**标定与读取路径绑定**：`ver` 不匹配时直接忽略存档并回退到出厂默认值，避免旧标定
-把每次点击都映射到错误位置（表现成“触摸完全没反应”）。
-校准入口放串口而不是屏幕按钮，是为了避免“标定不准 → 点不中校准按钮”的死锁。
-完整命令表见 [usage.md](./usage.md) 第 5 节。
-
-## 8. 构建验证
+## 7. 构建验证
 
 ```powershell
-& "D:\Espressif\EIM\v6.1\esp-idf\export.ps1"
-cd d:\Codes\lvgl_pinyin_ime\examples\k26_k9_demo
-idf.py set-target esp32s3       ; idf.py build
+& "<你的 IDF 路径>\export.ps1"
+cd <仓库根>\examples\k26_k9_demo
+idf.py set-target esp32s3            ; idf.py build
 idf.py --preview set-target esp32s31 ; idf.py --preview build
-idf.py set-target esp32p4       ; idf.py build
+idf.py set-target esp32p4            ; idf.py build
 ```
 
 标准：三个 target 均输出 `Project build complete`，且无本组件产生的警告。
+ESP-IDF 6.1 中 `esp32s31` 仍标记为 preview，缺少 `--preview` 会被拒绝。
 
-说明：ESP-IDF 6.1 中 `esp32s31` 仍标记为 preview，缺少 `--preview` 会被拒绝。
+不需要硬件的编译检查（针对某目标，不烧板）见
+[README 的验证一节](../README_zh-cn.md#验证不需要硬件)。
 
-首次构建前若尚未创建 IDF 6.1 的 Python 环境，需先执行一次
-`& "D:\Espressif\EIM\v6.1\esp-idf\install.ps1"`（安装器末尾会提示
-`Invalid feature specifier: -IdfTarget`，该报错不影响 Python 环境创建）。
+### 7.1 `idf.py fullclean` 不会清掉 `build/config/sdkconfig.h`
 
-### 8.1 语音输入的验证（不需要硬件）
+症状很迷惑：把 `sdkconfig` 里的某个 `CONFIG_` 改回关闭、跑 `idf.py build`，结果对应
+文件仍被编译 —— 配置里明明写着"没开"。
 
-语音模块的两种配置都要编：默认配置是"语音关"，此时 `src/voice/` 不参与编译，
-`src/ui/` 里所有 `#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE` 走另一条分支 —— 而那条
-分支才是绝大多数接入方实际编到的代码。
-
-```powershell
-# 1. 协议层（PC 上跑，不需要网络与板子，136 条断言）
-gcc -std=c11 -Wall -Wextra -Werror -Isrc `
-  test_apps/host_voice_test/main.c `
-  src/voice/ime_voice_proto.c src/voice/ime_voice_crypto.c `
-  -o build/host_voice_test/host_voice_test.exe
-.\build\host_voice_test\host_voice_test.exe
-
-# 2. 组件：语音开 / 关两种配置的语法与类型检查
-#    （复用 examples/k26_k9_demo/build/compile_commands.json 里的编译参数，
-#      同一个交叉编译器、同一套 include，只做 -fsyntax-only，几秒钟出结果）
-powershell -ExecutionPolicy Bypass -File tools\check_voice_build.ps1
-
-# 3. 示例工程的语音源文件（net_wifi.c / net_ws.c / mic_i2s.c）
-powershell -ExecutionPolicy Bypass -File tools\check_voice_example.ps1
-```
-
-两个脚本都**不重新配置 cmake**，所以不需要 `idf.py reconfigure`，也就绕开了
-"改 sdkconfig 要重跑配置"那一步。第 3 个脚本用的是真 IDF 头 + 一个
-`esp_websocket_client` 桩头（见 `test_apps/idf_component_build/stub_include/` 的说明），
-覆盖到除"桩与真头差异"之外的全部 API 用法。
-
-真机联调（需要麦克风与 Wi-Fi）见 [voice.md](./voice.md) 的第 2、10 节。
-
-### 8.2 ⚠ `idf.py fullclean` 不会清掉 `build/config/sdkconfig.h`
-
-踩过一次，症状很迷惑：把 `sdkconfig` 里的
-`CONFIG_LV_PINYIN_IME_VOICE_ENABLE` 改回关闭、跑 `idf.py build`，结果
-`main/mic_i2s.c` 仍然被编译并报 `driver/i2s_pdm.h: No such file or directory` ——
-配置里明明写着"没开"。
-
-原因：
-- `fullclean` 清的是目标文件与生成物，**`build/config/` 下那份生成出来的
-  `sdkconfig.h` 会留下**；
-- 它比 `sdkconfig` 新（是上一次配置时生成的），所以 CMake 的"输入比输出新"判断
-  认为不需要重新生成，于是编译器继续看到**旧的** `CONFIG_` 宏。
-
-处理：改完 `sdkconfig` 若行为不符合预期，直接删掉整个 `build/` 再构建：
+原因：`fullclean` 清的是目标文件与生成物，`build/config/` 下那份生成出来的
+`sdkconfig.h` 会留下；它比 `sdkconfig` 新，CMake 的"输入比输出新"判断认为不需要重新
+生成，于是编译器继续看到旧的宏。处理：改完 `sdkconfig` 若行为不符合预期，直接删掉整个
+`build/` 再构建。判断当前真实配置最快的办法：
 
 ```powershell
-Remove-Item -Recurse -Force build
-idf.py build
-```
-
-同理，`test_apps/idf_component_build` 那种"只做编译检查"的工程也会受同一问题影响。
-判断当前真实配置最快的办法是直接看生成物：
-
-```powershell
-Select-String -Path build\config\sdkconfig.h -Pattern 'LV_PINYIN_IME_VOICE'
+Select-String -Path build\config\sdkconfig.h -Pattern 'LV_PINYIN_IME'
 ```

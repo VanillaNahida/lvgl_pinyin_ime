@@ -7,17 +7,16 @@ UI 层（唯一依赖 lvgl）
   根对象 → 候选栏（拼音浮窗 + 候选词行 + < >）→ 键盘（K26 / K9 / P1 / P2 / P3）
 
 会话层 ime_session.c
-  拼音缓冲 / 分词 / 翻页游标 / 上屏 / 联想触发 / 模式切换
+  拼音缓冲 / 分词 / 翻页游标 / 上屏 / 模式切换 / 9 键缓冲
 
 引擎层（不依赖 LVGL，可主机端单测）
-  ime_engine_port → libgooglepinyin（全拼 / 双拼 / 词组 / 整句）
-  ime_t9          → 数字串 → 候选拼音串（Trie 切分）
-  ime_scheme      → 双拼键位映射（六套）
-  ime_fuzzy       → 模糊音变体（默认关）
-  ime_assoc       → 联想（哈希表 bigram + 首字联想 + 用户近期词）
+  ime_engine_port.cpp → libgooglepinyin（全拼 / 词组 / 整句）
+  ime_t9              → 数字串 → 候选拼音串
+  ime_trie            → 数字串 → 候选音节（查表）
+  ime_hash            → 开放寻址哈希表（通用结构）
 
 数据层
-  ime_dict / ime_extdict / ime_userdb / ime_font
+  ime_dict / ime_dict_vfs / ime_font
 ```
 
 约束：
@@ -26,31 +25,33 @@ UI 层（唯一依赖 lvgl）
   `test_apps/host_core_test` 独立编译与断言。
 - `src/ui/` 只通过 `ime_session.c` 暴露的接口驱动引擎，不直接调用 libgooglepinyin。
 
+> 计划中的双拼（`ime_scheme`）、模糊音（`ime_fuzzy`）、联想（`ime_assoc`）、用户词典
+> （`ime_userdb`）、SD 扩展词库（`ime_extdict`）**尚无对应文件**，属"规划中"，见
+> [README 的功能与现状](../README_zh-cn.md#功能与现状)。
+
 ## 2. 模块清单
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/ui/lv_pinyin_ime.c` | 根对象：生命周期、事件分发、状态机入口 |
+| `src/ui/lv_pinyin_ime.c` | 根对象：生命周期、尺寸/字体全局状态、事件分发、退格长按、按键分发 |
 | `src/ui/lv_pinyin_ime_cand.c` | 候选栏：拼音浮窗 + 候选词行 + `<` `>` 翻页 |
-| `src/ui/lv_pinyin_ime_k26.c` | 26 键键盘（P0）+ 英文模式 |
-| `src/ui/lv_pinyin_ime_k9.c` | 九键键盘 + 候选拼音行 |
-| `src/ui/lv_pinyin_ime_panel.c` | P1 / P2 / P3 数字与符号面板 |
+| `src/ui/lv_pinyin_ime_kb.c` | 键盘表与构建：26 键 / 九键 / P1–P3 面板、键位布局、重建 |
 | `src/ui/lv_pinyin_ime_style.c` | 默认样式，可被应用覆盖 |
-| `src/core/ime_session.c` | 会话状态机：拼音缓冲、分词、翻页、上屏、联想 |
-| `src/core/ime_engine_port.c` | 引擎门面，包装 libgooglepinyin C API |
+| `src/ui/mic_icon.c` | 语音键的麦克风图标（内嵌位图） |
+| `src/ui/lv_pinyin_ime_internal.h` | UI 各编译单元共享的私有状态，不对外 |
+| `src/core/ime_session.c` | 会话状态机：拼音缓冲、分词、翻页、上屏、模式、9 键 |
+| `src/core/ime_engine_port.cpp` | 引擎门面，包装 libgooglepinyin C API |
 | `src/core/ime_t9.c` | 数字串 → 候选拼音串 |
-| `src/core/ime_scheme.c` | 六套双拼映射表 |
-| `src/core/ime_fuzzy.c` | 模糊音变体（默认关） |
-| `src/core/ime_assoc.c` | 联想（默认开） |
-| `src/core/ime_utf.c` | UTF-8 ↔ UTF-16LE |
+| `src/core/ime_trie.c` | 数字串 → 候选音节（前缀索引） |
 | `src/core/ime_hash.c` | 开放寻址哈希表 |
-| `src/core/ime_trie.c` | 字典树 |
 | `src/core/ime_alloc.c` | PSRAM 优先分配器 |
-| `src/data/ime_dict.c` | 词库装载（分区 / SD / 内置三选一） |
+| `src/data/ime_dict.c` | 词库装载（分区 / SD / 内嵌三选一） |
 | `src/data/ime_dict_vfs.c` | 只读 VFS：dict 分区 mmap → `/dict/dict_pinyin.dat` |
-| `src/data/ime_extdict.c` | SD 扩展词库 bin 解析 |
-| `src/data/ime_userdb.c` | 用户词典 FAT 挂载 + 落盘节流 |
-| `src/data/ime_font.c` | 字体分区 mmap + `lv_binfont` |
+| `src/data/ime_font.c` | 字体加载（内嵌 C 数组 / `font` 分区 `lv_binfont`） |
+| `src/voice/ime_voice.c` | 语音会话状态机与 40 ms 音频节拍 |
+| `src/voice/ime_voice_proto.c` | 请求帧构造与返回帧解析 |
+| `src/voice/ime_voice_crypto.c` | base64 / SHA-256 / HMAC-SHA256 |
+| `src/voice/ime_voice_ui.c` | 语音与键盘/候选栏的粘合层 |
 
 ## 3. 核心数据流
 
@@ -58,29 +59,30 @@ UI 层（唯一依赖 lvgl）
 
 ```
 按键 q … i
-  → lv_pinyin_ime_k26.c  → ime_session_push_letter('i')
+  → lv_pinyin_ime_kb.c / lv_pinyin_ime.c  → ime_session_push_letter('i')
   → ime_session 维护拼音缓冲 "ni"（含分词符 '）
   → ime_engine_port.ime_engine_search("ni")
   → libgooglepinyin im_search() → 候选 UTF-16 列表
-  → ime_utf 转 UTF-8 → 回填候选栏（lv_pinyin_ime_cand.c）
+  → 转 UTF-8 → 回填候选栏（lv_pinyin_ime_cand.c）
 ```
 
-### 3.2 上屏与联想
+### 3.2 上屏
 
 ```
 点击候选 / 按 ✓
-  → ime_session_commit(index)
+  → ime_session_commit_candidate(index)
   → 写入绑定的 lv_textarea
-  → ime_assoc 查询 bigram / 首字联想 → 产生下一轮候选
-  → ime_userdb 记录词频（脏标记，达到 AUTOSAVE_EVERY 次或显式 flush 才落盘）
 ```
+
+> 用户词频学习与联想已预留接口（`ime_engine_predict()` 封装了上游
+> `im_get_predicts()`），但 UI 尚未调用，也还没有用户词典落盘模块。
 
 ### 3.3 九键输入
 
 ```
 按键 PQRS(7) → 数字缓冲 "7"
-  → ime_t9_gen("7") → 候选拼音串（Trie 切分）
-  → 点击候选拼音 "xi" → 当作全拼缓冲  进入 3.1 流程
+  → ime_t9_gen("7") → 候选拼音串（查音节表）
+  → 点击候选拼音 "xi" → 当作全拼缓冲，进入 3.1 流程
 ```
 
 ## 4. libgooglepinyin 移植补丁清单
@@ -96,7 +98,7 @@ UI 层（唯一依赖 lvgl）
 | P2 | 改 `mmap/open/flock` | 上游运行时本就用 `fopen/fread`；写回路径 `userdict.cpp` 用 `open/lseek/write/ftruncate`，ESP-IDF 全部支持 |
 | P3 | 零拷贝 mmap | 不需要：`src/data/ime_dict_vfs.c` 已把 dict 分区映射后以只读文件暴露给 `fopen` |
 | P4 | 确认 pthread 静态初始化 | ESP-IDF 自带 pthread；仅主机（MinGW）走 `std::recursive_mutex` 替身 |
-| P5 | 用户词典脏标记 | 上游 `userdict.cpp` 本来就只在 `close_dict()` 写回；S5 在此之上叠加节流策略 |
+| P5 | 用户词典脏标记 | 上游 `userdict.cpp` 本来就只在 `close_dict()` 写回；节流策略属 S5，尚未落地 |
 | P6 | `printf` → `ESP_LOGx` | 上游运行时 `printf` 全部被 `kPrintDebugX = false` 关掉，无需改动 |
 | P7 | `third_party` 整体 `-w` | 已实现，且只作用于该组件 |
 
@@ -124,10 +126,10 @@ size_t im_get_predicts(const char16 *his_buf, char16 (*&pre_buf)[kMaxPredictSize
 - `MatrixSearch::init()` 不接受 NULL 用户词库路径（但接受不存在的路径），因此
   `ime_engine_open()` 在"仅内存用户词库"时传入空串。
 - `im_get_predicts()` 使用 C++ 引用参数，C 侧由 `ime_engine_predict()` 包装。
-- **上游完全没有双拼支持**（无 `SetDpScheme`、无方案表），S5 需在
-  `src/core/ime_scheme.c` 自行实现方案映射后再喂全拼给引擎。
+- **上游完全没有双拼支持**（无 `SetDpScheme`、无方案表），双拼需自行实现方案映射后再
+  喂全拼给引擎，属规划中。
 
-## 5. 解码算法：unigram 引擎 + 自建 bigram 联想
+## 5. 解码算法：unigram 引擎（联想层尚未落地）
 
 ### 5.1 引擎层（上游 libgooglepinyin，unigram）
 
@@ -145,44 +147,37 @@ ime_engine_search(全拼串)
 的得分；多音节句子的切分靠 `extend_mtrx_nd()` 在这些 unigram 得分上做动态规划，
 而不是靠词间转移概率。这是 2009 年上游遗留的真实短板。
 
-### 5.2 联想层（本项目，bigram）
+### 5.2 联想层（规划中）
 
-上屏之后由 `ime_assoc.c` 预测下一个词，2-gram 信息在这一层：
-
-| 来源 | 说明 |
-| --- | --- |
-| bigram 哈希表 | `ime_hash.c`，键为前词，值为后继候选及其计数 |
-| 首字联想 | 前词首字 → 常用搭配 |
-| 用户近期词 | 近期上屏记录，冷启动时兜底 |
-
-数据来自 `ime_bigram.bin`，由 `tools/gen_bigram.py` 离线生成；未提供语料时不生成该
-文件，联想自动降级为「首字联想 + 用户近期词」，功能不报错。**该层属 S5，尚未落地。**
+计划在上屏之后由联想层预测下一个词，2-gram 信息放在这一层（bigram 哈希表
+`ime_hash.c` 已实现，但暂无调用方；数据计划来自离线生成的 `ime_bigram.bin`）。
+**该层尚未落地**，因此当前实际生效的只有 5.1 的 unigram 引擎。
 
 ### 5.3 结论
 
 - **引擎**是纯 unigram，这是继承自上游的真实限制；
-- **项目**在其上另有一层 bigram 联想；
+- **项目**计划在其上另加一层 bigram 联想，但还没有代码；
 - 与 libpinyin / sunpinyin 比较时，准确说法是「libgooglepinyin 引擎仅用 unigram
   打分」，而非「本项目仅用 unigram」。
 
 九键路径自身不带任何打分：`ime_trie.c` 数字串→候选音节、`ime_t9.c` 展开，都是查表，
-随后把拼好的全拼串交给同一个引擎。排序逻辑只有一处——引擎加联想层。
+随后把拼好的全拼串交给同一个引擎。排序逻辑只有一处 —— 引擎。
 
 ## 6. 哈希表与字典树的落点
 
 | 结构 | 用途 | 实现说明 |
 | --- | --- | --- |
-| 哈希表 `ime_hash.c` | 扩展词库索引、S5 的联想 bigram 与用户词频 | 开放寻址 + 线性探测 + 墓碑槽位，容量固定为 2 的幂，键为组件自持副本 |
-| 前缀索引 `ime_trie.c` | 九键数字 → 拼音（`94` → `xi`/`yi`/`zi`；`9464` → `xing`/`ying`），最短拼写优先 | 音节表按数字串排序，413 条全表扫描（ESP32-S3 上数微秒），不建节点表、不额外占 RAM |
+| 哈希表 `ime_hash.c` | 计划用于联想 bigram 与用户词频（尚未接线） | 开放寻址 + 线性探测 + 墓碑槽位，容量固定为 2 的幂，键为组件自持副本 |
+| 前缀索引 `ime_trie.c` | 九键数字 → 拼音（`94` → `xi`/`yi`/`zi`；`9464` → `xing`/`ying`），最短拼写优先 | 音节表按数字串排序，全表扫描，不建节点表、不额外占 RAM |
 
 ## 7. 内存预算（ESP32-S3-N16R8，8 MB PSRAM）
 
 | 项 | 规模 | 位置 |
 | --- | --- | --- |
-| dict 分区映射 | 1.5 MB（实际约 1.1 MB 词库） | flash → mmap，零拷贝优先 |
+| dict 分区映射 | 分区约 1.5 MB（实际词库约 1.1 MB） | flash → mmap |
 | 候选 / 会话缓冲 | < 64 KB | 内部 RAM |
-| 用户词典（FAT） | 1 MB 分区 | flash |
-| 字体分区映射 | ≤ 3 MB | flash → mmap |
+| 用户词典（FAT） | 1 MB 分区（规划中，尚未使用） | flash |
+| 字体分区映射 | ≤ 3 MB（`PARTITION` 模式下） | flash → mmap |
 | 引擎运行时（Trie 等） | 约 1.5–2 MB（零拷贝路径下更低） | PSRAM 优先 |
 
 ## 8. 相关文档
@@ -190,4 +185,4 @@ ime_engine_search(全拼串)
 - 键位与布局：[keymap.md](./keymap.md)
 - 组件接入：[integration.md](./integration.md)
 - 词库二进制格式：[dict_format.md](./dict_format.md)
-- 算法与相关项目对比：[../README.md](../README.md#algorithm)
+- 功能现状与算法概览：[../README_zh-cn.md](../README_zh-cn.md)

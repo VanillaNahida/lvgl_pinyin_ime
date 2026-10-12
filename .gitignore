@@ -10,6 +10,10 @@ sdkconfig.old
 # (e.g. ime_t9_syllables.h) that the build includes, so it must stay trackable.
 /generated/
 
+# Development scratch that must not reach the repository
+docs/dev/
+examples/*/demo_build.txt
+
 # Python tool environment
 tools/venv/
 .venv/

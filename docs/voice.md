@@ -255,7 +255,7 @@ codec 48 kHz stereo ──┬─ 取一路声道（或两路平均）
 ### 7.1 协议层（主机端，不需要网络与硬件）
 
 ```powershell
-cd d:\Codes\lvgl_pinyin_ime
+cd <仓库根>
 gcc -std=c11 -Wall -Wextra -Werror -Isrc `
   test_apps/host_voice_test/main.c `
   src/voice/ime_voice_proto.c src/voice/ime_voice_crypto.c `
@@ -317,7 +317,7 @@ powershell -ExecutionPolicy Bypass -File tools\check_voice_build.ps1
 
 ### 7.3 真机
 
-照 `docs/integration.md` §8 的标准流程构建三个目标：
+照 `docs/integration.md` §7 的标准流程构建三个目标：
 
 ```powershell
 & "D:\Espressif\EIM\v6.1\esp-idf\export.ps1"
