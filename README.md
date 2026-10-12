@@ -82,6 +82,9 @@ powershell -ExecutionPolicy Bypass -File tools\setup_env.ps1
 python tools\gen_dict.py
 ```
 
+Dictionary generation in detail - the word list format, adding your own words, and what
+to do when a build fails - is in [docs/dict_build.md](docs/dict_build.md).
+
 ### 3. Build
 
 **The repository root is a component, not a project** - `idf.py` has to run from
@@ -247,6 +250,7 @@ idf.py set-target esp32s3 ; idf.py build
 | [docs/keymap.md](docs/keymap.md) | key layout and per-key behaviour (26-key / 9-key / panels) |
 | [docs/architecture.md](docs/architecture.md) | layering, module list, data flow, algorithm, port patches |
 | [docs/voice.md](docs/voice.md) | voice input integration and implementation notes |
+| [docs/dict_build.md](docs/dict_build.md) | building the dictionary: word list format, custom words, checks |
 | [docs/dict_format.md](docs/dict_format.md) | binary formats for the dictionary and font images |
 
 ## Layout

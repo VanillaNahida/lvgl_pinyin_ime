@@ -60,8 +60,9 @@ python tools\gen_dict.py
 ```
 
 词库不下载官方 `dict_pinyin.dat`：仓库内置上游原始词表，由仓库内的 dictbuilder
-现场生成，结果可复现（1 073 858 B）。字体生成需要 Node.js；字数与体积的取舍见
-[integration.md](./integration.md) 第 5 节。
+现场生成，结果可复现（实测 1 068 442 B，逐字节可复现）。词表格式、怎么加自己的词、
+生成失败怎么查，见 [dict_build.md](./dict_build.md)；字体生成需要 Node.js，字数与体积的
+取舍见 [integration.md](./integration.md) 第 5 节。
 
 ---
 

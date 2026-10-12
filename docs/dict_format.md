@@ -86,8 +86,9 @@ u32  freq         共现次数
 - 来源：仓库内置的上游原始词表
   （`data/dict/rawdict_utf16_65105_freq.txt` + `valid_utf16.txt`），由仓库内的
   dictbuilder 现场生成，结果可复现。
-- 生成：`python tools/gen_dict.py`，输出 `data/dict/dict_pinyin.dat`（1 073 858 B）。
-  首次运行会自动编译 `generated/dictbuilder`。
+- 生成：`python tools/gen_dict.py`，输出 `data/dict/dict_pinyin.dat`（实测 1 068 442 B）。
+  首次运行会自动编译 `generated/dictbuilder`。完整步骤、词表格式与自定义词见
+  [dict_build.md](./dict_build.md)。
 - 装载方式：
   - `PARTITION`：dict 分区 mmap → 只读 VFS `/dict/dict_pinyin.dat` → 上游 `fopen`；
     分区不存在时回退到内嵌副本

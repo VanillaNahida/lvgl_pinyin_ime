@@ -77,6 +77,9 @@ powershell -ExecutionPolicy Bypass -File tools\setup_env.ps1
 python tools\gen_dict.py
 ```
 
+词库生成的细节——词表格式、怎么加自己的词、生成失败怎么查——见
+[docs/dict_build.md](docs/dict_build.md)。
+
 ### 3. 编译
 
 **仓库根目录是组件，不是工程** —— `idf.py` 必须在工程目录里运行，否则 CMake 会把
@@ -225,6 +228,7 @@ idf.py set-target esp32s3 ; idf.py build
 | [docs/keymap.md](docs/keymap.md) | 键位布局与逐键行为（26 键 / 九键 / 面板） |
 | [docs/architecture.md](docs/architecture.md) | 分层、模块清单、数据流、算法、移植补丁 |
 | [docs/voice.md](docs/voice.md) | 语音输入接入与实现要点 |
+| [docs/dict_build.md](docs/dict_build.md) | 词库生成：词表格式、加自己的词、校验与排查 |
 | [docs/dict_format.md](docs/dict_format.md) | 词库 / 字体镜像的二进制格式 |
 
 ## 目录结构

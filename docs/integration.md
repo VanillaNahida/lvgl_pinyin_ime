@@ -113,12 +113,14 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/ime_16mb.csv"
 | `EMBEDDED` | 链接进 app 的二进制（`target_add_binary_data`） | 拷进 PSRAM 后经同一 VFS 暴露；8 MB 方案使用 |
 
 词库不下载官方 `dict_pinyin.dat`：仓库内置上游原始词表，由仓库内的 dictbuilder 现场
-生成，结果可复现（1 073 858 B）：
+生成，结果可复现（实测 1 068 442 B）：
 
 ```powershell
 cd <仓库根>
 python tools\gen_dict.py            # 首次会自动编译 generated/dictbuilder
 ```
+
+词表格式、加自定义词、字体覆盖与故障排查见 [dict_build.md](./dict_build.md)。
 
 烧写词库与字体分区（分区表由 `idf.py flash` 写入，内容用 parttool）：
 
