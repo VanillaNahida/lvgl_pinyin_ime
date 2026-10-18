@@ -32,6 +32,8 @@ commit target and pinyin decoding.
 - Voice input (optional): iFlytek streaming dictation - the component runs the protocol, your application supplies the socket and the microphone
 - Targets: ESP32-S3 (primary), ESP32-P4; ESP32-S31 is a preview target
 - Reference board: ST7789 (SPI, 320 x 240 landscape) + XPT2046 touch
+- There is also an **ESP32-S31-Korvo-1** example (800 x 480 RGB panel + GT1151
+  touch): [examples/esp32s31-korvo-demo](examples/esp32s31-korvo-demo)
 
 **Not sure where to start?** To just build, flash and see it run, jump to
 [Quick start](#quick-start-run-the-example). To wire it into your own project,
@@ -100,6 +102,18 @@ idf.py build
 
 The first build downloads LVGL 9.5 into `managed_components/`.
 
+On an **ESP32-S31-Korvo-1**, use `examples\esp32s31-korvo-demo` instead, and
+select the target with `--preview` (S31 is a preview target in ESP-IDF 6.1):
+
+```powershell
+cd examples\esp32s31-korvo-demo
+idf.py --preview set-target esp32s31
+idf.py build
+```
+
+Display, touch and voice notes are in that directory's
+[README](examples/esp32s31-korvo-demo/README.md).
+
 ### 4. Flash and watch the log
 
 ```powershell
@@ -119,18 +133,34 @@ in [docs/usage.md](docs/usage.md).
 
 ### 1. Declare the dependency
 
-The component is pulled in through the ESP-IDF component manager.
-`main/idf_component.yml`:
+The component is pulled in through the ESP-IDF component manager, straight from
+this project's GitHub repository. `main/idf_component.yml`:
 
 ```yaml
 dependencies:
   idf: ">=5.3"
   lvgl/lvgl: "^9.5"
   lvgl_pinyin_ime:
-    version: "*"          # once published to the component registry
-    # or, during development, override with a local path:
+    git: https://github.com/VanillaNahida/lvgl_pinyin_ime
+    # Pin a tag / branch / commit here; without it the default branch (main) is used:
+    # version: "main"
+    # While developing the component itself, point at a local checkout instead:
     # override_path: "../../lvgl_pinyin_ime"
 ```
+
+The component needs the vendored `libgooglepinyin` from its own tree, and
+`generated/` (dictionary + fonts) is not committed - so declaring the dependency
+alone is **not enough to build**:
+
+1. add `managed_components/lvgl_pinyin_ime/src/third_party/libgooglepinyin` to
+   `EXTRA_COMPONENT_DIRS` in the project's top level `CMakeLists.txt` (ESP-IDF does
+   not scan a component's own subdirectories for components);
+2. generate the dictionary and fonts once inside the fetched
+   `managed_components/lvgl_pinyin_ime/`.
+
+Both commands, plus the advice to use `override_path` against a local clone if you
+regenerate the charset often, are in
+[docs/integration.md](docs/integration.md) section 2.2.
 
 ### 2. Make main depend on it
 

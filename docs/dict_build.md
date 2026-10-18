@@ -228,23 +228,23 @@ python tools\gen_dict.py
 
 ### 4.2 新字能不能显示：字体覆盖（最常见的坑）
 
-**编得进词库，不等于画得出来。** 字体字符集由 `generated/charset.txt` 决定，
-默认只有 GB2312 + UI 符号 + ASCII，共 **7551** 字；而引擎能输出的汉字有 **16465** 个，
-其中 **9716 个不在 GB2312 里**。这些字即使进了词库，候选栏里也只会显示缺字方框。
-
-所以加的词如果含 GB2312 之外的字（生僻字、繁体、人名用字），要同时扩字体：
+**编得进词库，不等于画得出来。** 但这一点现在默认已经处理好了：`gen_charset.py`
+生成的字表（17 265 字）就是 GB2312 + UI + ASCII + **`valid_utf16.txt`** +
+**`rawdict_utf16_65105_freq.txt`** + `extra_chars.txt`，引擎能输出的 16 465 个汉字
+一个不缺。改了词表、加了新字之后，**重跑一次字体生成**即可：
 
 ```powershell
-# 重新生成字符集，并看覆盖报告
-.\tools\venv\Scripts\python.exe tools\gen_charset.py
-type generated\font_coverage_report.txt
-
-# 真要全收：把词表里出现的字都加进字体（20px 字体会 +2.1 MB）
-.\tools\venv\Scripts\python.exe tools\gen_charset.py --with-extra-hanzi
-.\tools\venv\Scripts\python.exe tools\gen_font.py
+.\tools\venv\Scripts\python.exe tools\gen_charset.py   # 重扫词表，刷新字表
+type generated\font_coverage_report.txt                   # 看还缺什么（正常是 0）
+.\tools\venv\Scripts\python.exe tools\gen_font.py      # 重编字体（要几分钟）
 ```
 
-字数与体积的取舍见 [integration.md](./integration.md) 第 5 节。
+想再塞进源字体没有、词库也没有的字符（符号、圈号、希腊字母之类），直接写进
+`data\dict\extra_chars.txt` —— 它会被并进字表，不用改代码。
+
+体积代价：字表从 7 551 字涨到 17 265 字后，两套字体从约 1.1 MB 涨到约 3.2 MB，
+且必须打开 `CONFIG_LV_FONT_FMT_TXT_LARGE`（20 px 字体的位图超过 1 MB，20 位偏移
+寻址不到）。细节见 [integration.md](./integration.md) 第 5 节。
 
 ### 4.3 用户词（打字学词）目前不落盘
 
@@ -299,5 +299,5 @@ I (xxx) ime_dict: self test: read 1068442 of 1068442 bytes from /ime/dict_pinyin
 | 条数对得上 | 看 `lemma num` | 行数 − lemma num = 预期的丢弃数 |
 | 字长正确 | `python tools\check_dict.py ...` | `4-byte words ... ESP32 can read it as is` |
 | 引擎能读 | `host_core_test.exe data/dict/dict_pinyin.dat` | 全部通过 |
-| 新字能显示 | `generated/font_coverage_report.txt` | 新词的字不在 "beyond GB2312" 列表里 |
+| 新字能显示 | `generated/font_coverage_report.txt` | `engine characters this font lacks: 0` |
 | 设备上生效 | 启动日志的 `system dictionary` / `self test` | 字节数与本地文件一致 |

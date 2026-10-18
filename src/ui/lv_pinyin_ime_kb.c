@@ -626,7 +626,7 @@ static void voice_page_build(lv_pinyin_ime_ctx_t *ctx)
      */
     int32_t area_h = 0;
     if (IME_UI_FIT_HEIGHT_PX > 0) {
-        const int32_t fit_h = IME_UI_FIT_HEIGHT_PX - 2 * IME_STYLE_ROOT_PAD;
+        const int32_t fit_h = IME_UI_FIT_HEIGHT_PX - 2 * IME_UI_PAD_Y;
         const int32_t mic_space = fit_h - 2 * row_h - 2 * gap;
         if (mic_space >= row_h) {
             area_h = fit_h;
@@ -720,6 +720,14 @@ void ime_ui_apply_keyboard(lv_pinyin_ime_ctx_t *ctx, const ime_keyboard_t *kb)
     ctx->kb_key_count = 0;
 
 #if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+    /*
+     * ★ 语音页那两个指针必须先清掉：它们指向的对象刚刚被 lv_obj_clean() 删掉了，
+     *   留着就是悬垂指针 —— ime_ui_voice_sync() 每次（100 ms）都会拿 voice_page_status
+     *   去 lv_label_set_text()，离开语音页之后那一写就是在已释放的对象上（真机会崩）。
+     */
+    ctx->voice_page_status = NULL;
+    ctx->voice_page_mic = NULL;
+
     if (ctx->panel == LV_PINYIN_IME_PANEL_VOICE) {
         /*
          * 语音页：三区段自己搭；候选栏让位（状态由那一行文字承担）。
@@ -738,6 +746,12 @@ void ime_ui_apply_keyboard(lv_pinyin_ime_ctx_t *ctx, const ime_keyboard_t *kb)
     if (ctx->cand_bar != NULL) {
         lv_obj_remove_flag(ctx->cand_bar, LV_OBJ_FLAG_HIDDEN);
     }
+    /*
+     * ★ 回到普通键盘时**必须把高度还原成 LV_SIZE_CONTENT**：语音页给它设过确定高度
+     *   （fit 模式下是"目标高度 - 边距"，比键行本身高得多），不还原的话键盘下面会留出
+     *   一整条空白 —— 用户报的"从语音页返回 26 键后空格下面多一块留白"就是这个。
+     */
+    lv_obj_set_height(ctx->kb_rows, LV_SIZE_CONTENT);
 #endif
 
     if (kb == NULL) {

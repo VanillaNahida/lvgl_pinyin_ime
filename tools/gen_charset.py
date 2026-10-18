@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """Build the font character set for the IME.
 
-Two sources are merged:
+The set is the union of every character the engine can actually put on screen:
 
 1. GB2312 (6763 Hanzi plus punctuation and Latin), enumerated with the standard
    library codec, so the result does not depend on any extra package.
-2. Optionally, every BMP Hanzi that actually occurs in the dictionary word list
-   (`--extra-scan`). Anything the dictionary uses but GB2312 does not contain is
-   reported, because those characters would otherwise render as the missing
-   glyph box.
+2. The dictionary's own character sets, both taken from data/dict/:
+     valid_utf16.txt                what the engine may output (16 465 Hanzi)
+     rawdict_utf16_65105_freq.txt   what the word list mentions (16 462 Hanzi)
+   Without these the candidate bar draws the missing glyph box for the ~9.7k
+   characters the dictionary contains but GB2312 does not.
+3. data/dict/extra_chars.txt, hand written additions (symbols, punctuation,
+   rare characters that no dictionary entry uses).
 
 Outputs (under generated/):
-    charset.txt             one character per line, ready for lv_font_conv
-    charset_gb2312.txt      GB2312 only
-    font_coverage_report.txt  what the scan found and what is missing
+    charset.txt               one character per line, ready for lv_font_conv
+    charset_gb2312.txt        GB2312 only, for the smallest possible font
+    charset_full.txt          the full union
+    font_coverage_report.txt  what went in and what is still missing
 
 Usage:
-    python tools/gen_charset.py
-    python tools/gen_charset.py --extra-scan data/dict/rawdict_utf16_65105_freq.txt
+    python tools/gen_charset.py                        # full dictionary coverage
+    python tools/gen_charset.py --gb2312-only          # smallest font
+    python tools/gen_charset.py --extra-scan <word list>
 """
 
 from __future__ import annotations
@@ -55,7 +60,14 @@ def gb2312_chars() -> list[str]:
 
 
 def scan_dictionary(path: pathlib.Path) -> set[str]:
-    """All BMP Hanzi that occur in a UTF-16LE file (word list or valid set)."""
+    """Every character that occurs in a UTF-16LE word list or valid set.
+
+    This used to keep only BMP Hanzi (0x4E00..0x9FFF), which silently dropped
+    what the word lists also contain: the warning sign in a few entries, Latin
+    letters, digits and the full width punctuation some words carry. Anything
+    the dictionary can put on screen has to have a glyph, so collect it all and
+    let the coverage report say what is still missing.
+    """
     raw = path.read_bytes()
     text = raw.decode("utf-16-le", errors="replace")
     if text.startswith("\ufeff"):
@@ -63,14 +75,38 @@ def scan_dictionary(path: pathlib.Path) -> set[str]:
 
     out: set[str] = set()
     for ch in text:
-        if 0x4E00 <= ord(ch) <= 0x9FFF:
-            out.add(ch)
+        # Whitespace and control characters are not glyphs the font needs;
+        # U+0020 is added separately (see gen_font.py's --range 32).
+        if ch.isspace() or ord(ch) < 0x20:
+            continue
+        out.add(ch)
+    return out
+
+
+def scan_extra_chars(path: pathlib.Path) -> set[str]:
+    """Every non-blank character in extra_chars.txt.
+
+    The file is free form on purpose: whole lines starting with '#' are
+    comments, whitespace is ignored (those glyphs always exist), and everything
+    else is collected and de-duplicated.
+    """
+    out: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        for ch in line:
+            if not ch.isspace():
+                out.add(ch)
     return out
 
 
 def write_lines(path: pathlib.Path, chars: list[str]) -> None:
+    # newline="\n" keeps the file byte-identical on Windows and POSIX: with the
+    # platform default, Windows writes CRLF and the sha256 of a regenerated
+    # charset differs from the one produced on Linux for no reason.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(ch + "\n" for ch in chars), encoding="utf-8")
+    with path.open("w", encoding="utf-8", newline="\n") as fh:
+        fh.write("".join(ch + "\n" for ch in chars))
 
 
 def main() -> int:
@@ -82,29 +118,30 @@ def main() -> int:
     ap.add_argument("--valid-scan", default=None,
                     help="character set the engine can actually output (default: "
                          "data/dict/valid_utf16.txt); the coverage report is about this set")
-    ap.add_argument("--no-extra-scan", action="store_true")
+    ap.add_argument("--extra-chars", default=None,
+                    help="hand written additions (default: data/dict/extra_chars.txt)")
+    ap.add_argument("--gb2312-only", action="store_true",
+                    help="restrict the font to GB2312 + UI + ASCII. Much smaller, "
+                         "but every dictionary character outside GB2312 then renders "
+                         "as the missing glyph box.")
     ap.add_argument("--with-extra-hanzi", action="store_true",
-                    help="also include every Hanzi the word list contains. The "
-                         "engine can output about 9.7k characters beyond GB2312; "
-                         "including them makes the 20px font +2.1 MB (tools/"
-                         "measure_fonts.py), which does not fit the 3 MB font "
-                         "partition alongside the 16px font, so this is off by "
-                         "default and the extras render as the missing glyph box")
+                    help="deprecated no-op: including the dictionary characters is "
+                         "the default now, use --gb2312-only to opt out")
+    ap.add_argument("--no-extra-scan", action="store_true",
+                    help="deprecated; same as --gb2312-only for the word list")
     ap.add_argument("--out-dir", default=str(root / "generated"))
     args = ap.parse_args()
 
     out_dir = pathlib.Path(args.out_dir)
     gb = gb2312_chars()
 
+    scan_path = pathlib.Path(args.extra_scan) if args.extra_scan else \
+        root / "data" / "dict" / "rawdict_utf16_65105_freq.txt"
     scanned: set[str] = set()
-    scan_path = None
-    if not args.no_extra_scan:
-        scan_path = pathlib.Path(args.extra_scan) if args.extra_scan else \
-            root / "data" / "dict" / "rawdict_utf16_65105_freq.txt"
-        if scan_path.exists():
-            scanned = scan_dictionary(scan_path)
-        else:
-            print(f"note: scan source not found, skipping: {scan_path}")
+    if scan_path.exists():
+        scanned = scan_dictionary(scan_path)
+    else:
+        print(f"note: scan source not found, skipping: {scan_path}")
 
     valid_path = pathlib.Path(args.valid_scan) if args.valid_scan else \
         root / "data" / "dict" / "valid_utf16.txt"
@@ -114,16 +151,36 @@ def main() -> int:
     else:
         print(f"note: valid-character source not found, skipping: {valid_path}")
 
-    ui = set(EXTRA_UI)
-    if args.with_extra_hanzi:
-        merged = sorted(set(gb) | ui | scanned | set(ASCII))
+    extra_path = pathlib.Path(args.extra_chars) if args.extra_chars else \
+        root / "data" / "dict" / "extra_chars.txt"
+    extra: set[str] = set()
+    if extra_path.exists():
+        extra = scan_extra_chars(extra_path)
     else:
+        print(f"note: extra character file not found, skipping: {extra_path}")
+
+    ui = set(EXTRA_UI)
+    dictionary_chars = scanned | engine_chars
+    # Whitespace characters (U+3000 from GB2312, a stray NBSP in a word list)
+    # never need a glyph, and gen_font.py reads this file with str.split(), which
+    # drops them anyway - keeping them here would only make the reported glyph
+    # count disagree with the font that is actually built. U+0020 is supplied to
+    # lv_font_conv separately (--range 32).
+    full = sorted(c for c in set(gb) | ui | dictionary_chars | extra | set(ASCII)
+                  if not c.isspace())
+
+    if args.gb2312_only or args.no_extra_scan:
         merged = sorted(set(gb) | ui | set(ASCII))
-    # Characters the engine can output but the font would miss.
-    missing = sorted(engine_chars - set(gb) - ui)
+        why = "GB2312 + UI + ASCII"
+    else:
+        merged = full
+        why = "GB2312 + UI + ASCII + dictionary + extra_chars.txt"
+
+    # Characters the engine can output but this font would miss.
+    missing = sorted(engine_chars - set(merged))
 
     write_lines(out_dir / "charset_gb2312.txt", gb)
-    write_lines(out_dir / "charset_full.txt", sorted(set(gb) | ui | scanned | set(ASCII)))
+    write_lines(out_dir / "charset_full.txt", full)
     write_lines(out_dir / "charset.txt", merged)
 
     report = [
@@ -133,32 +190,37 @@ def main() -> int:
         f"UI symbols beyond GB2312   : {len(ui - set(gb))}",
         f"ASCII added                : {len(ASCII)}",
         f"word list scanned          : {scan_path if scanned else '(none)'}",
-        f"Hanzi in the word list     : {len(scanned)}",
+        f"characters in the word list: {len(scanned)}",
         f"engine output set          : {valid_path if engine_chars else '(none)'}"
-        f"  ({len(engine_chars)} Hanzi)",
+        f"  ({len(engine_chars)} characters)",
+        f"extra_chars.txt            : {extra_path if extra else '(none)'}"
+        f"  ({len(extra)} characters)",
         "",
-        f"font character set         : {len(merged)}"
-        + ("  (GB2312 + UI + ASCII)" if not args.with_extra_hanzi else "  (including extras)"),
+        f"font character set         : {len(merged)}  ({why})",
         "",
-        f"engine characters beyond GB2312: {len(missing)}",
+        f"engine characters this font lacks: {len(missing)}",
     ]
     if missing:
         preview = missing[:80]
-        report.append("".join(preview) + (f"  ... and {len(missing) - len(preview)} more" if len(missing) > len(preview) else ""))
+        report.append("".join(preview)
+                      + (f"  ... and {len(missing) - len(preview)} more"
+                         if len(missing) > len(preview) else ""))
         report.append("")
-        if args.with_extra_hanzi:
-            report.append("These are included in charset.txt, so the generated font has them.")
+        if args.gb2312_only or args.no_extra_scan:
+            report.append("These render as the missing glyph box. Drop --gb2312-only to")
+            report.append("include every dictionary character in the font.")
         else:
-            report.append("These are NOT in charset.txt: the 3 MB font partition only fits the")
-            report.append("GB2312 set (tools/measure_fonts.py). They render as the missing glyph")
-            report.append("box. Regenerate with --with-extra-hanzi to trade flash for coverage.")
+            report.append("These are missing from GB2312 AND from the dictionary; the engine")
+            report.append("can only reach them through a word list entry. Add the ones you")
+            report.append("need to data/dict/extra_chars.txt.")
     else:
-        report.append("(none)")
+        report.append("(none - every character the engine can output has a glyph)")
 
     (out_dir / "font_coverage_report.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
-    print(f"GB2312 {len(gb)} + UI {len(ui - set(gb))} + ASCII {len(ASCII)} + word list {len(scanned)}")
+    print(f"GB2312 {len(gb)} + UI {len(ui - set(gb))} + ASCII {len(ASCII)} "
+          f"+ word list {len(scanned)} + engine {len(engine_chars)} + extra {len(extra)}")
     print(f"font charset {len(merged)} characters -> {out_dir / 'charset.txt'}")
-    print(f"engine output set: {len(engine_chars)} Hanzi, {len(missing)} beyond GB2312")
+    print(f"engine output set: {len(engine_chars)} characters, {len(missing)} missing from the font")
     print(f"report -> {out_dir / 'font_coverage_report.txt'}")
     return 0
 

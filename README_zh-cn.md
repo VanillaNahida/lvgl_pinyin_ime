@@ -31,6 +31,8 @@
 - 语音输入（可选）：讯飞流式听写，组件跑协议，应用提供 socket 与麦克风
 - 目标平台：ESP32-S3（主要）、ESP32-P4；ESP32-S31 为 preview 目标
 - 参考板：ST7789（SPI，320 x 240 横屏）+ XPT2046 触摸
+- 另有 **ESP32-S31-Korvo-1** 的示例（800 x 480 RGB 屏 + GT1151 触摸）：
+  [examples/esp32s31-korvo-demo](examples/esp32s31-korvo-demo)
 
 **不知道从哪开始？** 只是想编译、烧录、看效果，直接看下面的[快速开始](#快速开始跑示例)；
 要把它接进你自己的工程，看[接入你自己的工程](#接入你自己的工程)。
@@ -93,6 +95,18 @@ idf.py build
 
 首次构建会联网把 LVGL 9.5 拉到 `managed_components/`。
 
+板子是 **ESP32-S31-Korvo-1** 的话，把第 3 步的目录换成
+`examples\esp32s31-korvo-demo`，并且目标要带 `--preview`（S31 在 IDF 6.1 里是
+preview 目标）：
+
+```powershell
+cd examples\esp32s31-korvo-demo
+idf.py --preview set-target esp32s31
+idf.py build
+```
+
+屏幕/触摸/语音的说明见该目录的 [README](examples/esp32s31-korvo-demo/README.md)。
+
 ### 4. 烧录并观察
 
 ```powershell
@@ -110,17 +124,30 @@ idf.py -p COM5 flash monitor     # COM5 换成你的串口；Ctrl + ] 退出
 
 ### 1. 声明依赖
 
-组件通过 ESP-IDF 组件管理器引入。`main/idf_component.yml`：
+组件通过 ESP-IDF 组件管理器引入，源就是本项目的 GitHub 仓库。`main/idf_component.yml`：
 
 ```yaml
 dependencies:
   idf: ">=5.3"
   lvgl/lvgl: "^9.5"
   lvgl_pinyin_ime:
-    version: "*"          # 已发布到组件仓库时
-    # 开发期用本地路径覆盖，二选一：
+    git: https://github.com/VanillaNahida/lvgl_pinyin_ime
+    # 需要固定版本时加一行（tag / 分支 / commit 都行）；不写则跟默认分支 main：
+    # version: "main"
+    # 开发本仓库时改用本地路径：
     # override_path: "../../lvgl_pinyin_ime"
 ```
+
+组件依赖仓库内自带的 `libgooglepinyin`，而且 `generated/`（词库与字体）不入库 ——
+所以还差两步，**只写 `idf_component.yml` 是构建不起来的**：
+
+1. 工程根 `CMakeLists.txt` 里把
+   `managed_components/lvgl_pinyin_ime/src/third_party/libgooglepinyin` 加进
+   `EXTRA_COMPONENT_DIRS`（ESP-IDF 不扫描组件自己的子目录）；
+2. 在拉取下来的 `managed_components/lvgl_pinyin_ime/` 里生成一次词库与字体。
+
+两条命令、以及「想反复改字表就用 `override_path` 指本地 clone」的建议，见
+[docs/integration.md](docs/integration.md) 第 2.2 节。
 
 ### 2. 让 main 依赖它
 

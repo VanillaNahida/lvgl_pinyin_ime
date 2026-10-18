@@ -42,17 +42,74 @@ project(k26_k9_demo)
 
 ### 2.2 独立工程引入
 
-在你的工程里让 `main` 依赖它。`main/idf_component.yml`：
+在你的工程里让 `main` 依赖它。组件直接从本项目的 GitHub 仓库拉取，
+`main/idf_component.yml`：
 
 ```yaml
 dependencies:
   idf: ">=5.3"
   lvgl/lvgl: "^9.5"
   lvgl_pinyin_ime:
-    version: "*"          # 已发布到组件仓库时
-    # 开发期用本地路径覆盖，二选一：
+    git: https://github.com/VanillaNahida/lvgl_pinyin_ime
+    # 需要固定版本时加一行（tag / 分支 / commit 都行）；不写则跟默认分支 main：
+    # version: "main"
+    # 开发本仓库时改用本地路径：
     # override_path: "../../lvgl_pinyin_ime"
 ```
+
+**光有这一步还构建不起来**，下面两件事都是「仓库里没有、必须你自己补」的：
+
+#### 2.2.1 注册仓库内自带的引擎组件
+
+`lvgl_pinyin_ime` 依赖同仓库的 `src/third_party/libgooglepinyin`，组件管理器虽然把它
+一起拉下来了，但 **ESP-IDF 不扫描组件自己的子目录**，必须显式注册。工程根目录的
+`CMakeLists.txt`：
+
+```cmake
+cmake_minimum_required(VERSION 3.16)
+
+set(EXTRA_COMPONENT_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}/managed_components/lvgl_pinyin_ime/src/third_party/libgooglepinyin"
+)
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(your_project)
+```
+
+> 组件管理器建出来的目录名就是 `lvgl_pinyin_ime`（没有命名空间前缀）。漏掉这一步会在
+> configure 阶段直接报错：
+> `Failed to resolve component 'libgooglepinyin' required by component 'lvgl_pinyin_ime'`。
+
+#### 2.2.2 生成词库与字体
+
+`generated/` 不入库（`.gitignore` 里），克隆下来是空的，而组件在默认的
+`FONT_SRC_EMBEDDED` 下找不到字体就直接 `FATAL_ERROR`：
+
+```
+lvgl_pinyin_ime: .../generated/lv_font_ime_20.c is missing.
+Run: python tools/gen_charset.py && python tools/gen_font.py
+```
+
+所以要在**被拉取下来的那份组件目录里**生成一次：
+
+```powershell
+cd managed_components\lvgl_pinyin_ime
+powershell -ExecutionPolicy Bypass -File tools\setup_env.ps1   # 建 tools/venv，需联网
+.\tools\venv\Scripts\python.exe tools\gen_charset.py
+.\tools\venv\Scripts\python.exe tools\gen_font.py           # 需要 Node.js（lv_font_conv）
+python tools\gen_dict.py                                      # 需要 C++ 编译器
+```
+
+词库与字体的完整说明见 [dict_build.md](./dict_build.md)。
+
+> **`managed_components/` 归组件管理器管。** 平时 `idf.py reconfigure` / `build` 不会动
+> 这些生成物（实测保留），但**改动依赖、换 `version`、或删掉 `managed_components/`
+> 重新拉取时，整个目录会被替换**，词库和字体就没了，得再生成一次。要长期开发或反复
+> 改字表，**更省事的做法是自己 clone 一份仓库、用 `override_path` 指过去**，在那份里
+> 跑生成命令 —— 也就是本仓库 [usage.md](./usage.md) 第 3 节的流程；本地 clone 不会被
+> 组件管理器覆盖。
+
+#### 2.2.3 让 main 依赖它
 
 `main/CMakeLists.txt`：
 
@@ -66,8 +123,9 @@ idf_component_register(
 
 然后 `idf.py reconfigure` 会拉取/链接组件。
 
-> 用 `override_path` 指向本仓库时，`libgooglepinyin` 是仓库内的子组件，组件管理器会
-> 一并解析。若直接 copy 本仓库到工程里，记得连同 `src/third_party/` 一起带。
+> 若不用组件管理器、直接把本仓库 copy 进工程，记得连同 `src/third_party/` 一起带，
+> 并在工程根 `CMakeLists.txt` 里把仓库根和 `src/third_party/libgooglepinyin` 都加进
+> `EXTRA_COMPONENT_DIRS`（示例工程就是这么做的，见 `examples/k26_k9_demo/CMakeLists.txt`）。
 
 ---
 
@@ -151,12 +209,17 @@ powershell -ExecutionPolicy Bypass -File tools\flash_dict.ps1 -Port COM5 -Dict -
 键盘一上电就能显示汉字**，没有文件系统参与，也就没有"字体加载失败 → 候选栏全是方框"
 这种静默故障。
 
-实测体积（GB2312 + UI + ASCII，7 549 字，均 2 bpp）：
+实测体积（17 265 字 = GB2312 + UI + ASCII + 整本词库的字符集，均 2 bpp）：
 
-| 字体 | 规格 | 位图数据 |
-| --- | --- | --- |
-| `lv_font_ime_20` | 20 px / 2 bpp | 约 675 KB |
-| `lv_font_ime_16` | 16 px / 2 bpp | 约 437 KB |
+| 字体 | 规格 | 位图数据 | 描述符（大格式 16 B/字） |
+| --- | --- | --- | --- |
+| `lv_font_ime_20` | 20 px / 2 bpp | 1 633 804 B | 约 270 KB |
+| `lv_font_ime_16` | 16 px / 2 bpp | 1 055 775 B | 约 270 KB |
+
+两套合计约 3.2 MB 会编进 app（比只覆盖 GB2312 时多约 2.2 MB），再加上内嵌词库的
+1 MB，示例工程 app 约 5.5 MB —— 16 MB 分区表的 8 MB app 分区放得下，
+**8 MB 分区表（app 只有 4 MB）放不下**，那块板子要么改用 `PARTITION` 字体，要么
+`gen_charset.py --gb2312-only` 收窄字表。
 
 ### 5.2 PARTITION（可选）
 
@@ -185,13 +248,16 @@ powershell -ExecutionPolicy Bypass -File tools\setup_env.ps1   # 只需一次，
 因为只查一件会互相掩盖：字符在 `generated/charset.txt` 里吗；以及字符在**生成出来的
 字体**里吗（`lv_font_conv` 会静默丢掉源 TTF 里没有字形的符号）。
 
-字表默认 **GB2312 + UI 符号 + ASCII（7 549 字）**。字表里没有的字会显示为缺字方框；
-需要更全的字表时：
+字表默认就是**全量**：GB2312 + UI 符号 + ASCII + `data/dict/valid_utf16.txt` +
+`data/dict/rawdict_utf16_65105_freq.txt` + `data/dict/extra_chars.txt`，共 17 265 字，
+引擎能输出的 16 465 个汉字一个不缺。想要最小体积时收窄：
 
 ```powershell
-.\tools\venv\Scripts\python.exe tools\gen_charset.py --with-extra-hanzi
-.\tools\venv\Scripts\python.exe tools\measure_fonts.py          # 先看体积
+.\tools\venv\Scripts\python.exe tools\gen_charset.py --gb2312-only   # 7 551 字
+.\tools\venv\Scripts\python.exe tools\measure_fonts.py               # 先看体积
 ```
+
+自己在 `data/dict/extra_chars.txt` 里写的字符会被并进字表，不用改代码。
 
 `tools/inspect_font.py` 可校验生成物是否为合法的 LVGL 二进制字体容器：
 
@@ -201,10 +267,15 @@ powershell -ExecutionPolicy Bypass -File tools\setup_env.ps1   # 只需一次，
 
 ### 5.4 三个必须记住的约束
 
-**`CONFIG_LV_FONT_FMT_TXT_LARGE` 必须保持关闭。** `lv_font_conv` 只会写紧凑的 8 字节
-glyph 描述符（`bitmap_index:20`）；打开大格式后 LVGL 按 12 字节步长遍历，结果**一个字
-都画不出来**（不是方框，是空白）。它同时也是 1 MB 位图上限的来源，`gen_font.py` 会在
-生成时校验并直接报错，`src/data/ime_font.c` 里有编译期 `#error` 拦住误开。
+**`CONFIG_LV_FONT_FMT_TXT_LARGE` 必须打开。** 它把 `bitmap_index` 从 20 位加宽到 32 位；
+字表覆盖整本词库后 20 px 字体需要约 1.6 MB 位图，远超 20 位能寻址的 1 MB，关掉它偏移量
+会被静默截断，越过 1 MB 的字全部画错。LVGL 自己的 Kconfig 也建议超过约 1 万字时打开。
+
+> 这里原先写的是「必须关闭」，理由是 `lv_font_conv` 只写紧凑描述符、开大格式会让 LVGL 按
+> 12 字节步长读 8 字节数组。**那个说法是错的**：`lv_font_conv` 输出的数组用的是 LVGL 自己
+> 的 `lv_font_fmt_txt_glyph_dsc_t` 加指定初始化器（见生成文件里的 `glyph_dsc[]`），结构体
+> 布局由编译器按 LVGL 头文件决定，生成端和读取端不可能不一致。示例的
+> `sdkconfig.defaults` 与两个主机测试的 `lv_conf.h` 都已改为打开。
 
 **空格必须单独用 `--range 32` 指定。** `gen_charset.py` 是一行一个字符写 `charset.txt`
 的，空格落下就是一个空行，读回时被丢掉。字表里没有空格 → cmap 从 U+0021 开始 →

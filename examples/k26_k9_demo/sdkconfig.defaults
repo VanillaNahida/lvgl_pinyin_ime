@@ -14,13 +14,12 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
 # LVGL: 16 bit colour per pixel. The byte order the ST7789 needs is selected at
 # runtime with lv_display_set_color_format(), see main.c.
 CONFIG_LV_COLOR_DEPTH_16=y
-# LV_FONT_FMT_TXT_LARGE must stay OFF. lv_font_conv only ever emits the compact
-# 8 byte lv_font_fmt_txt_glyph_dsc_t (bitmap_index:20, adv_w:12, ...), so with
-# the large 12 byte format enabled LVGL walks glyph_dsc[] at the wrong stride and
-# draws nothing at all. The generated fonts fit the 1 MB / 20 bit offset field:
-# 797 KB for the 20 px font and 341 KB for the 16 px one. src/data/ime_font.c
-# has a compile time check for this.
-# CONFIG_LV_FONT_FMT_TXT_LARGE is not set
+# LV_FONT_FMT_TXT_LARGE is REQUIRED: the fonts cover the dictionary character set
+# (17 265 glyphs), and the 20 px font needs ~1.6 MB of glyph bitmap - past the
+# 1 MB that the compact 20 bit bitmap_index field can address. lv_font_conv emits
+# lv_font_fmt_txt_glyph_dsc_t with designated initializers, so the array is laid
+# out from LVGL's own header and the large format cannot desync from it.
+CONFIG_LV_FONT_FMT_TXT_LARGE=y
 
 # The IME loads the generated fonts from memory: the font partition is mmap()ed
 # and handed to lv_binfont_create_from_buffer(), which is LVGL's memory file

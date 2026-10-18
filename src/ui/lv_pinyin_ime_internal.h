@@ -37,11 +37,15 @@ extern "C" {
  * Margin applied by the widget root's own style (see ime_style_apply_root) and
  * the gap between the root's children.
  *
- * ★ 键盘区的坐标原点是 ctx->kb_rows —— 它在 root 的内容区里，root 的 pad_all 已经
- *   让出了这两个像素。所以布局引擎的 outer_pad_* 必须是 0：同一份间距算两次，正是
+ * ★ 键盘区的坐标原点是 ctx->kb_rows —— 它在 root 的内容区里，root 的 padding 已经
+ *   让出了这份间距。所以布局引擎的 outer_pad_* 必须是 0：同一份间距算两次，正是
  *   旧 update_unit_px() 从父对象宽度里再扣一次 IME_UI_PAD 时的毛病。
+ *
+ * ★ 左右是 0（键盘顶到控件左右边缘），上下是 2；用到"上下那 2 px"的地方（垂直分摊）
+ *   请用 IME_UI_PAD_Y，别拿 X 去凑。
  */
-#define IME_UI_PAD IME_STYLE_ROOT_PAD
+#define IME_UI_PAD_X IME_STYLE_ROOT_PAD_X
+#define IME_UI_PAD_Y IME_STYLE_ROOT_PAD_Y
 
 /** Candidates drawn at once in the candidate bar (one page). */
 #define IME_UI_CAND_MAX 12

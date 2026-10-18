@@ -242,38 +242,6 @@ static int32_t measure_row_height(const measure_req_t *req, int32_t pad_y, int32
     return (int32_t)(free_h / req->rows);
 }
 
-/**
- * Can every CENTER row be rounded to the nearest pixel and still fit the grid?
- *
- * U is derived so that the *reference* row fills the grid exactly, so rounding its
- * keys up by up to 0.5 px each can push a row over the edge. When that happens the
- * whole keyboard switches to rounding down (see metrics.round_widths) - one pixel
- * narrower keys everywhere is invisible, whereas mixing the two modes inside one
- * keyboard is not (the same 0.9u key would be 17 px on one row and 18 px on the
- * next, which is exactly the "columns do not line up" complaint).
- */
-static bool center_rows_fit_rounded(const ime_keyboard_t *kb, int32_t content_width, int32_t gap,
-                                    int32_t unit_milli)
-{
-    if (kb == NULL) {
-        return true;   /* no rows to check: the caller describes its own grid */
-    }
-    for (size_t r = 0; r < kb->row_count; r++) {
-        const ime_row_t *row = &kb->rows[r];
-        if (row->align != IME_ROW_ALIGN_CENTER || row->keys == NULL) {
-            continue;
-        }
-        int64_t width = (int64_t)(row->count - 1) * gap;
-        for (size_t k = 0; k < row->count; k++) {
-            width += ((int64_t)row->keys[k].width_u * unit_milli + 5000) / 10000;
-        }
-        if (width > content_width) {
-            return false;
-        }
-    }
-    return true;
-}
-
 static bool measure_core(const ime_layout_theme_t *theme, const measure_req_t *req,
                          ime_layout_metrics_t *out)
 {
@@ -390,7 +358,6 @@ static bool measure_core(const ime_layout_theme_t *theme, const measure_req_t *r
     out->row_height = row_height;
     out->unit_milli = unit_milli;
     out->content_width = content;
-    out->round_widths = center_rows_fit_rounded(req->kb, content, gap_x, unit_milli);
     /* Center the (possibly capped) grid inside the area, margins included. */
     out->x_offset = pad_x + (req->width - 2 * pad_x - content) / 2;
     out->used_height = 2 * pad_y + req->rows * row_height + (req->rows - 1) * gap_y;
@@ -517,49 +484,52 @@ static bool solve_row_fill(const ime_row_t *row, const ime_layout_metrics_t *m, 
 }
 
 /**
- * CENTER row: every key is `width_u` tenths of the standard unit, and the finished
- * row is centered in the grid. This is what keeps the letters the same width on
- * R1/R2/R3 while those rows are naturally indented (they carry 120, 111 and 114
- * tenths respectively) - the "standard phone keyboard" look the old flex layout
- * could not produce, because flex grow re-scaled each row to its own width.
+ * CENTER row: every key is `width_u` tenths of the standard unit, and the keys'
+ * edges are snapped to the unit grid (see below).
  *
- * ★ 每个键**各自**取整（w = round(width_u * U / 10)），不是"按累计值取整"。
- *   两种取整方式差一像素，但结果完全不同：
+ * ★ 取整方式：**吸附到单位网格**，而不是"每个键各自取整"或"按累计值取整"。
+ *   把每个键的左右边缘的**单位位置** u 换算成像素：`px(u) = round(u * U / 10)`，
+ *   键宽 = px(右边缘) - px(左边缘)。这三条性质同时成立，而前两种做法各自只能拿到一条：
  *
- *     累计取整：行严格铺满网格，可是同一个 0.9u 的字母键会按它在行里的位置分别
- *               得到 21 或 22 px —— q=a=22 而 z=21，**同一列的键在不同行不一样宽**。
- *     各自取整：同一个逻辑宽度在任何行、任何位置都是同一个像素宽度（列对得齐），
- *               代价是这一行不严格等于网格宽度，取整余量变成两侧对称的留白
- *               （26 键 R1 在 320 px 屏上是每边 1 px，看不出来）。
+ *     1. 整行宽度 = px(行总单位)，而参考行的行总单位正好对应网格宽度 —— 所以
+ *        **参考行一个像素不剩地铺满网格**（26 键 R1、九键四行、符号页十列行），
+ *        最外侧的 符 / ⌫ / ?123 / ✓ 直接顶到控件左右边缘，两侧没有背景色窄条
+ *        （用户报的"最左侧和最右侧均有留白"）。
+ *     2. **同一个单位位置上的键宽度严格相同**：26 键 R1 的 q 与 R2 的 a 都在 1.5u
+ *        处，九键四行的第 2 列都在 2.4u 处 —— 所以列在不同行之间是对齐的。
+ *     3. 不需要"先四舍五入、放不下再全体向下取整"这种全局开关：行宽天然 ≤ 网格宽，
+ *        永远不会溢出。
  *
- *   指南 §4.2 要的正是后者："先按标准单位计算每个键的宽度，再将整行居中"。
- *
- * ★ 取整方式由 metrics.round_widths 统一决定（整个键盘用同一种）：四舍五入放得下就
- *   四舍五入（键宽最接近设计值），有一个 CENTER 行放不下就全体向下取整（保证同一逻辑
- *   宽度的键在任何行都是同一个像素宽度）。见 center_rows_fit_rounded()。
+ *   代价只有一个：同一行里相邻的、逻辑宽度相同的键可能差 1 px（21/22 交替）——
+ *   那是"精确铺满"的必然结果，并排的键差 1 px 看不出来，远好过整条边空着。
  */
 static bool solve_row_center(const ime_row_t *row, const ime_layout_metrics_t *m, int32_t y,
                              int32_t base_x, ime_key_rect_t *rects)
 {
     const int64_t gap_total = (int64_t)(row->count - 1) * m->key_gap;
-    const int32_t bias = m->round_widths ? 5000 : 0;
 
     int64_t row_width = gap_total;
+    int64_t units = 0;
+
     for (size_t i = 0; i < row->count; i++) {
-        int32_t width =
-            (int32_t)(((int64_t)row->keys[i].width_u * m->unit_milli + bias) / 10000);
+        const int64_t next_units = units + row->keys[i].width_u;
+        const int64_t left_px = (units * m->unit_milli + 5000) / 10000;
+        const int64_t right_px = (next_units * m->unit_milli + 5000) / 10000;
+
+        int32_t width = (int32_t)(right_px - left_px);
         if (width < 1) {
-            width = 1;
+            width = 1;   /* degenerate weight: a zero sized button is untouchable */
         }
         rects[i].width = width;
         row_width += width;
+        units = next_units;
     }
 
     if (row_width > m->content_width) {
         return false;   /* row wider than the grid: the table is over budget */
     }
 
-    /* Lay the keys out inside the centered row. */
+    /* Lay the keys out: a full-width row starts at the grid edge, others are centered. */
     int32_t x = base_x + (int32_t)((m->content_width - row_width) / 2);
     for (size_t i = 0; i < row->count; i++) {
         rects[i].x = x;

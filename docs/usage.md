@@ -113,6 +113,11 @@ idf.py -p COM5 flash monitor     # COM5 换成你的实际串口
   `idf.py --preview set-target esp32s31`，否则会被直接拒绝
 - 改过 `sdkconfig` 后行为不符合预期时：删掉整个 `build/` 再构建（见第 11 节）
 
+> **换板子**：上面的接线、校准与日志都是 `k26_k9_demo`（ST7789 + XPT2046）的。
+> 板子是 **ESP32-S31-Korvo-1**（800 × 480 RGB 屏 + GT1151 电容触摸，不需要校准）时，
+> 直接看 [examples/esp32s31-korvo-demo](../examples/esp32s31-korvo-demo/README.md)：
+> 那边有独立的引脚表、编译命令（`idf.py --preview set-target esp32s31`）和排错表。
+
 正常启动后串口会打印类似：
 
 ```
@@ -240,10 +245,18 @@ dependencies:
   idf: ">=5.3"
   lvgl/lvgl: "^9.5"
   lvgl_pinyin_ime:
-    version: "*"
-    # 开发期用本地路径覆盖：
+    git: https://github.com/VanillaNahida/lvgl_pinyin_ime
+    # 需要固定版本时加一行（tag / 分支 / commit 都行）；不写则跟默认分支 main：
+    # version: "main"
+    # 开发本仓库时改用本地路径：
     # override_path: "../../lvgl_pinyin_ime"
 ```
+
+> 这两行只是声明依赖。组件还依赖仓库内自带的 `libgooglepinyin`，且 `generated/`
+> 不入库 —— 工程根 `CMakeLists.txt` 要把
+> `managed_components/lvgl_pinyin_ime/src/third_party/libgooglepinyin` 加进
+> `EXTRA_COMPONENT_DIRS`，并在拉取下来的组件目录里生成一次词库与字体。
+> 见 [integration.md](./integration.md) 第 2.2 节。
 
 `main/CMakeLists.txt`：
 
@@ -267,9 +280,10 @@ lv_obj_add_event_cb(ime, on_ready, lv_pinyin_ime_event_ready(), NULL);
 
 ### 8.1 用应用自己的字库（推荐，字更全）
 
-组件自带的两套字体只覆盖 `tools/gen_charset.py` 选出的字符集（GB2312 + 十来个
-UI 符号），键盘上的说明文字一旦超出这个集合就是**缺字方框** —— 而同一个字在别的
-页面（用应用自己的字库）显示得好好的，看着就像"输入法的字库坏了"。
+组件自带的两套字体覆盖 `tools/gen_charset.py` 选出的字符集（默认 = GB2312 + UI
+符号 + 整本词库的字符集，17 265 字）。键盘上的说明文字一旦超出这个集合仍是**缺字
+方框** —— 而同一个字在别的页面（用应用自己的字库）显示得好好的，看着就像"输入法的
+字库坏了"。
 
 应用如果已经有 CJK 字库，直接让输入法用它（必须在任何 `lv_pinyin_ime_create()` 之前调用）：
 

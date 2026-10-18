@@ -32,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import re
 import shutil
@@ -57,20 +58,48 @@ def find_font(root: pathlib.Path) -> pathlib.Path:
     sys.exit("DreamHanSansSC-W17.ttf not found in the repository root")
 
 
-def lv_font_conv_command(explicit: str | None) -> list[str]:
-    if explicit:
-        return [explicit]
-    if sys.platform == "win32":
-        npx = shutil.which("npx.cmd") or shutil.which("npx")
-        if npx:
-            return [npx, "--yes", "lv_font_conv@1.5.2"]
+LV_FONT_CONV_VERSION = "1.5.2"
+
+# Where a private copy of lv_font_conv is installed on first use. Inside
+# generated/, which is already gitignored and safe to delete.
+LOCAL_TOOL_DIR = "lv_font_conv"
+
+
+def run_lv_font_conv(font_conv: str | None) -> list[str]:
+    """Return the argv prefix that runs lv_font_conv.
+
+    The direct node invocation matters on Windows. Going through npx.cmd forces
+    shell=True, and cmd.exe caps a command line at 8191 characters; a full
+    dictionary charset needs ~17k characters of --symbols, so npx dies with
+    "The command line is too long". node runs the same entry point with the
+    normal 32767 character CreateProcess limit and no shell at all.
+    """
+    if font_conv:
+        return [font_conv]
+
+    node = shutil.which("node") or shutil.which("node.exe")
+    if node:
+        entry = (pathlib.Path(__file__).resolve().parent.parent / "generated" /
+                 LOCAL_TOOL_DIR / "node_modules" / "lv_font_conv" / "lv_font_conv.js")
+        if not entry.exists():
+            npm = shutil.which("npm.cmd") or shutil.which("npm")
+            if npm:
+                # entry = <prefix>/node_modules/lv_font_conv/lv_font_conv.js
+                prefix = entry.parent.parent.parent
+                print(f"installing lv_font_conv@{LV_FONT_CONV_VERSION} into {prefix} ...")
+                subprocess.run([npm, "install", "--prefix", str(prefix), "--no-audit",
+                                "--no-fund", f"lv_font_conv@{LV_FONT_CONV_VERSION}"],
+                               check=True, shell=True)
+        if entry.exists():
+            return [node, str(entry)]
+
     found = shutil.which("lv_font_conv")
     if found:
         return [found]
-    npx = shutil.which("npx")
+    npx = shutil.which("npx.cmd") or shutil.which("npx")
     if not npx:
-        sys.exit("lv_font_conv not found and npx is unavailable; install Node.js LTS")
-    return [npx, "--yes", "lv_font_conv@1.5.2"]
+        sys.exit("lv_font_conv not found and npm/npx is unavailable; install Node.js LTS")
+    return [npx, "--yes", f"lv_font_conv@{LV_FONT_CONV_VERSION}"]
 
 
 def run_conv(cmd: list[str], font: pathlib.Path, size: int, bpp: int, symbols: str,
@@ -96,7 +125,10 @@ def run_conv(cmd: list[str], font: pathlib.Path, size: int, bpp: int, symbols: s
     if no_compress:
         args.append("--no-compress")
 
-    result = subprocess.run(args, capture_output=True, text=True, shell=(sys.platform == "win32"))
+    # Only a .cmd/.bat wrapper needs a shell; node and native binaries must not
+    # go through cmd.exe, which caps the command line at 8191 characters.
+    shell = sys.platform == "win32" and args[0].lower().endswith((".cmd", ".bat"))
+    result = subprocess.run(args, capture_output=True, text=True, shell=shell)
     if result.returncode != 0:
         # Surface the tool's own message: a truncated "failed" is useless.
         sys.stderr.write(f"lv_font_conv ({fmt}, {size}px, {bpp}bpp) exited {result.returncode}\n")
@@ -108,14 +140,22 @@ def run_conv(cmd: list[str], font: pathlib.Path, size: int, bpp: int, symbols: s
         raise SystemExit(1)
 
 
-# LVGL stores a glyph's bitmap offset in a 20 bit field unless
-# LV_FONT_FMT_TXT_LARGE is on, which caps glyph_bitmap[] at 1 MB. lv_font_conv
-# only ever emits the compact 8 byte glyph descriptor (see
-# lib/writers/lvgl/lv_table_glyf.js), so it is NOT compatible with
-# LV_FONT_FMT_TXT_LARGE: with that option on, LVGL walks glyph_dsc[] at a 12 byte
-# stride over 8 byte entries and every glyph comes out empty (text disappears
-# entirely - no boxes, nothing). The option must stay off and the bitmap must fit.
-MAX_GLYPH_BITMAP = 1048575  # 2^20 - 1
+# LVGL describes each glyph with lv_font_fmt_txt_glyph_dsc_t. In its compact
+# form (LV_FONT_FMT_TXT_LARGE == 0) bitmap_index is a 20 bit field, so
+# glyph_bitmap[] cannot exceed 1 MB; LV_FONT_FMT_TXT_LARGE widens it to 32 bits.
+#
+# lv_font_conv emits `lv_font_fmt_txt_glyph_dsc_t glyph_dsc[] = {...}` with
+# designated initializers, so the array always has the layout the C compiler
+# derives from LVGL's own header: generator and reader cannot disagree about the
+# stride, and the option is safe to turn on. (An earlier note here claimed the
+# opposite - that lv_font_conv was incompatible with the option. The generated
+# file was inspected: it uses LVGL's type, so that claim was wrong.)
+#
+# A full dictionary charset (17 265 glyphs) needs ~1.6 MB at 20 px / 2 bpp, well
+# over the compact field, so the project enables the option and this script
+# allows it by default; --no-large-bitmap restores the strict 1 MB check.
+MAX_GLYPH_BITMAP_COMPACT = 1048575  # 2^20 - 1
+MAX_GLYPH_BITMAP_LARGE = 0xFFFFFFFF
 
 LITERAL = re.compile(r"0x[0-9A-Fa-f]{1,2}\b")
 
@@ -250,9 +290,9 @@ def main() -> int:
                          "bin: LVGL binary image for the font partition")
     ap.add_argument("--big", type=int, default=DEFAULT_BIG)
     ap.add_argument("--small", type=int, default=DEFAULT_SMALL)
-    # 4 bpp for the 20 px font would need 1 053 966 bytes of glyph bitmap, over the
-    # 1 048 575 byte limit of LVGL's 20 bit offset field (and LV_FONT_FMT_TXT_LARGE
-    # cannot be used with lv_font_conv - see the check below). 2 bpp is 527 KB.
+    # 2 bpp keeps the bitmaps small; the compact 20 bit offset field is not a
+    # reason to go lower, because the project enables LV_FONT_FMT_TXT_LARGE (see
+    # the MAX_GLYPH_BITMAP_* comment at the top).
     ap.add_argument("--big-bpp", type=int, default=2, choices=[1, 2, 3, 4, 8])
     ap.add_argument("--small-bpp", type=int, default=2, choices=[1, 2, 3, 4, 8])
     ap.add_argument("--charset", default=str(root / "generated" / "charset.txt"))
@@ -263,6 +303,14 @@ def main() -> int:
                     help="suffix for the partition image name, for size experiments")
     ap.add_argument("--compress", action="store_true",
                     help="bin format only: let lv_font_conv LZ4 compress")
+    # On by default: the project ships LV_FONT_FMT_TXT_LARGE=1, because the full
+    # dictionary character set needs it (see the MAX_GLYPH_BITMAP_* comment).
+    ap.add_argument("--large-bitmap", action="store_true", default=True,
+                    help="(default) allow glyph_bitmap[] beyond 1 MB. Requires "
+                         "LV_FONT_FMT_TXT_LARGE=1 in lv_conf.h / sdkconfig")
+    ap.add_argument("--no-large-bitmap", action="store_false", dest="large_bitmap",
+                    help="refuse to emit a font whose bitmap_index leaves the compact "
+                         "20 bit field; use when building without LV_FONT_FMT_TXT_LARGE")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -289,7 +337,7 @@ def main() -> int:
             print(f"  {size}px/{bpp}bpp: roughly {est / 1024:.0f} KB of bitmap data")
         return 0
 
-    cmd = lv_font_conv_command(args.lv_font_conv)
+    cmd = run_lv_font_conv(args.lv_font_conv)
 
     if args.format == "c":
         # One file per font. The lv_font_t is named after the file, so the names
@@ -305,18 +353,23 @@ def main() -> int:
                   f"{info['bitmap']} glyph bitmap bytes, "
                   f"largest bitmap_index {info['max_index']}, "
                   f"bitmap_format {info['bitmap_format']}")
-            if info["max_index"] > MAX_GLYPH_BITMAP:
-                sys.exit(
-                    f"error: {out.name} needs bitmap_index {info['max_index']}, over the "
-                    f"{MAX_GLYPH_BITMAP} limit of LVGL's 20 bit offset field.\n"
-                    f"       LV_FONT_FMT_TXT_LARGE cannot be used instead: lv_font_conv only\n"
-                    f"       emits the compact glyph descriptor, so LVGL would read\n"
-                    f"       glyph_dsc[] at the wrong stride and draw nothing at all.\n"
-                    f"       Lower --big-bpp, or shrink the charset.")
+            if info["max_index"] > MAX_GLYPH_BITMAP_COMPACT:
+                if args.large_bitmap:
+                    print(f"  note: bitmap_index {info['max_index']} is past the compact "
+                          f"{MAX_GLYPH_BITMAP_COMPACT} field, so LV_FONT_FMT_TXT_LARGE "
+                          f"must be 1 in lv_conf.h / sdkconfig")
+                else:
+                    sys.exit(
+                        f"error: {out.name} needs bitmap_index {info['max_index']}, over the "
+                        f"{MAX_GLYPH_BITMAP_COMPACT} limit of LVGL's 20 bit offset field.\n"
+                        f"       Either drop --no-large-bitmap (the project enables\n"
+                        f"       LV_FONT_FMT_TXT_LARGE=1), or lower the bpp / shrink the\n"
+                        f"       charset.")
             worst = max(worst, info["max_index"])
 
-        print(f"largest bitmap_index across both fonts: {worst} "
-              f"(limit {MAX_GLYPH_BITMAP}; LV_FONT_FMT_TXT_LARGE must stay off)")
+        limit = MAX_GLYPH_BITMAP_LARGE if args.large_bitmap else MAX_GLYPH_BITMAP_COMPACT
+        print(f"largest bitmap_index across both fonts: {worst} (limit {limit}"
+              + ("; LV_FONT_FMT_TXT_LARGE must be on)" if args.large_bitmap else ")"))
         return 0
 
     # --format bin: build the two fonts and concatenate them for the partition.
@@ -339,6 +392,22 @@ def main() -> int:
     partition.write_bytes(big_bin.read_bytes() + small_bin.read_bytes())
     print(f"wrote {partition} ({partition.stat().st_size} bytes, "
           f"{partition.stat().st_size / 1024:.0f} KB)")
+
+    # Human readable mirror of what the partition holds. The firmware does not
+    # read this: ime_font.c recovers the two segment lengths by walking each
+    # font's [u32 length][4 byte label] table chain, because the image has no
+    # directory header.
+    layout = {
+        "big": {"file": big_bin.name, "size": big_bin.stat().st_size, "px": args.big,
+                "bpp": args.big_bpp},
+        "small": {"file": small_bin.name, "size": small_bin.stat().st_size, "px": args.small,
+                  "bpp": args.small_bpp},
+        "glyphs": len(chars),
+        "partition": {"file": partition.name, "size": partition.stat().st_size},
+    }
+    layout_path = out_dir / f"font_layout{args.suffix}.json"
+    layout_path.write_text(json.dumps(layout, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {layout_path}")
     return 0
 
 

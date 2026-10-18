@@ -657,8 +657,7 @@ int main(int argc, char **argv)
                (unsigned)rep->bad_gaps, (unsigned)rep->misaligned,
                (unsigned)rep->width_violations, (unsigned)rep->height_violations);
 
-        check(rep->keys > 0, "there are keys to check");
-        check(rep->out_of_bounds == 0, "no key sticks out of the keyboard area");
+        check(rep->keys > 0, "there are keys to check");        check(rep->out_of_bounds == 0, "no key sticks out of the keyboard area");
         check(rep->overlaps == 0, "no two keys overlap");
         check(rep->bad_gaps == 0, "the gap between two keys is the theme's gap");
         check(rep->misaligned == 0, "every centered row is centered");
@@ -670,6 +669,26 @@ int main(int argc, char **argv)
         const ime_keyboard_t *kb = ime_ui_active_keyboard(ctx);
         ime_key_rect_t rects[IME_UI_KEY_MAX];
         const uint32_t keys = lv_obj_get_child_count(ctx->kb_rows);
+
+        /*
+         * 键面的实际填充：普通键用 IME_COLOR_KEY（白），功能键用 IME_COLOR_SPECIAL
+         * （浅灰）。bg_opa = 0 的键在屏幕上看就是"只有文字和描边、没有键面"——
+         * lv_obj_remove_style_all() 摘掉了主题那层背景，样式只携带自己定义过的属性，
+         * 所以每个键的样式都必须**自己**写 bg_opa（s_key_special 曾经漏了这行，
+         * 于是 ⌫ / ⏎ / 分词 / 整个底部功能行全是透空的）。
+         */
+        {
+            int transparent = 0;
+            for (uint32_t i = 0; i < keys; i++) {
+                lv_obj_t *btn = lv_obj_get_child(ctx->kb_rows, i);
+                if (lv_obj_get_style_bg_opa(btn, LV_PART_MAIN) <= LV_OPA_MIN &&
+                    !lv_obj_has_state(btn, LV_STATE_DISABLED)) {
+                    transparent++;
+                }
+            }
+            printf("  keys without a visible fill: %d of %u\n", transparent, (unsigned)keys);
+            check(transparent == 0, "every enabled key has an opaque fill");
+        }
         if (ime_ui_calculate_layout(ctx, kb, rects, IME_UI_KEY_MAX)) {
             int mismatch = 0;
             for (uint32_t i = 0; i < keys && i < IME_UI_KEY_MAX; i++) {
@@ -689,24 +708,28 @@ int main(int argc, char **argv)
         }
 
         /*
-         * 26 键：字母键在 R1/R2/R3 上宽度必须完全相同（标准键宽的直接证据）。
-         * 旧实现每行各自分摊宽度，这三行的字母宽度是三套不同的值。
+         * 26 键：**同一列**的字母宽度必须完全相同（标准键宽 + 边缘吸附的直接证据）。
+         * q（R1，在 1.5u 的 符 之后）与 a（R2，在 1.5u 的 ⇧ 之后）处在同一个单位位置；
+         * w（R1，2.4u 处）与 z（R3，1.5u + 0.9u 之后 = 2.4u 处）同理。
+         * 旧实现每行各自分摊宽度，这些值是三套不同的数字。
          */
-        if (strcmp(mode, "k26") == 0 && strcmp(mode, "en") != 0) {
+        if (strcmp(mode, "k26") == 0 || strcmp(mode, "en") == 0) {
             lv_obj_t *q = find_letter_key(ime, 'q');
             lv_obj_t *a = find_letter_key(ime, 'a');
+            lv_obj_t *w = find_letter_key(ime, 'w');
             lv_obj_t *z = find_letter_key(ime, 'z');
             const int wq = (q != NULL) ? lv_obj_get_width(q) : -1;
             const int wa = (a != NULL) ? lv_obj_get_width(a) : -2;
-            const int wz = (z != NULL) ? lv_obj_get_width(z) : -3;
-            printf("  letter widths: q=%d a=%d z=%d (R1/R2/R3)\n", wq, wa, wz);
-            check(wq > 0 && wq == wa && wa == wz,
-                  "the letter keys have the same width on every row");
+            const int ww = (w != NULL) ? lv_obj_get_width(w) : -3;
+            const int wz = (z != NULL) ? lv_obj_get_width(z) : -4;
+            printf("  letter widths: q=%d a=%d (both at 1.5u), w=%d z=%d (both at 2.4u)\n", wq, wa,
+                   ww, wz);
+            check(wq > 0 && wq == wa, "q and a are the same width (same column)");
+            check(ww > 0 && ww == wz, "w and z are the same width (same column)");
         }
 
         /* 每一行的左右边界与行高（配合多分辨率一起看） */
-        int last_y = -1;
-        for (uint32_t i = 0; i < keys; i++) {
+        int last_y = -1;        for (uint32_t i = 0; i < keys; i++) {
             lv_obj_t *btn = lv_obj_get_child(ctx->kb_rows, i);
             const int y = lv_obj_get_y(btn);
             if (y != last_y) {
@@ -723,6 +746,43 @@ int main(int argc, char **argv)
             }
         }
     }
+
+#if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
+    if (strcmp(action, "voiceback") == 0) {
+        /*
+         * 去语音页再回来（用户报的"点了语音输入再返回 26 键，空格下面留白一部分"）。
+         *
+         * 语音页会把 kb_rows 的高度设成**确定值**（那一页只有三区段，要靠高度分摊），
+         * 返回普通键盘时如果不还原成 LV_SIZE_CONTENT，键盘下面就会留出语音页多出来的
+         * 那几十个像素 —— 一片什么都没有的底板。
+         */
+        lv_pinyin_ime_ctx_t *ctx = ime_ctx_get(ime);
+        lv_pinyin_ime_set_panel(ime, LV_PINYIN_IME_PANEL_VOICE);
+        lv_obj_update_layout(scr);
+        const int voice_h = lv_obj_get_height(ctx->kb_rows);
+        const uint32_t voice_children = lv_obj_get_child_count(ctx->kb_rows);
+
+        lv_pinyin_ime_set_panel(ime, LV_PINYIN_IME_PANEL_MAIN);
+        lv_obj_update_layout(scr);
+        const int back_h = lv_obj_get_height(ctx->kb_rows);
+        const uint32_t back_children = lv_obj_get_child_count(ctx->kb_rows);
+
+        /* 键盘内容高度 = 最后一个键的底边（rects 从 y=0 排下来） */
+        lv_obj_t *last = (back_children > 0) ? lv_obj_get_child(ctx->kb_rows, back_children - 1)
+                                             : NULL;
+        const int content_h = (last != NULL) ? lv_obj_get_y(last) + lv_obj_get_height(last) : -1;
+
+        printf("voiceback: voice page %u objects / %d px -> keyboard %u objects / %d px "
+               "(content %d px)\n",
+               (unsigned)voice_children, voice_h, (unsigned)back_children, back_h, content_h);
+        check(voice_children == 3, "the voice page has its three zones");
+        check(back_h == content_h,
+              "the keyboard area is exactly as tall as its rows (no blank strip below)");
+        check(back_h < voice_h, "and it is shorter than the voice page was");
+        check(ctx->voice_page_status == NULL && ctx->voice_page_mic == NULL,
+              "the voice page pointers are cleared (no dangling objects)");
+    }
+#endif
 
 #if CONFIG_LV_PINYIN_IME_VOICE_ENABLE
     if (strcmp(action, "layout") == 0 && strcmp(mode, "voice") == 0) {

@@ -167,7 +167,7 @@ static void chip_place(lv_pinyin_ime_ctx_t *ctx)
      * §12.0 那个看门狗）。内容区第一行就是候选栏，所以"候选栏上方"就是内容区
      * y = -(芯片高 + 1)。
      */
-    lv_obj_align(ctx->chip, LV_ALIGN_TOP_LEFT, IME_UI_PAD + 2, -(chip_h + 1));
+    lv_obj_align(ctx->chip, LV_ALIGN_TOP_LEFT, IME_UI_PAD_X + 2, -(chip_h + 1));
 }
 
 void ime_ui_build_candidates(lv_pinyin_ime_ctx_t *ctx)

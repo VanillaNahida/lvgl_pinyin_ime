@@ -1,0 +1,8 @@
+# ESP32-S31-WROOM-3: 16 MB PSRAM inside the package, 8 line (octal) mode.
+#
+# PSRAM is not optional on this board: the 800x480 RGB frame buffer alone is
+# 750 KB, so the panel frame buffer and the LVGL draw buffers are allocated
+# there (see main/board_display.c).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_200M=y

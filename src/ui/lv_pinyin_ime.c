@@ -188,7 +188,7 @@ void ime_ui_fit_row_height(lv_pinyin_ime_ctx_t *ctx, const ime_keyboard_t *kb)
         return;
     }
     const uint32_t root_children = 1u + (t9_visible ? 1u : 0u) + 1u; /* cand + t9? + kb_rows */
-    const uint32_t fixed = 2u * IME_STYLE_ROOT_PAD          /* root pad_all top+bottom */
+    const uint32_t fixed = 2u * IME_UI_PAD_Y            /* root pad top+bottom */
                          + (uint32_t)IME_STYLE_ROOT_GAP * (root_children - 1u)
                          + (uint32_t)IME_LAYOUT_ROW_GAP * (key_rows > 0 ? key_rows - 1u : 0u);
 
@@ -214,7 +214,7 @@ int32_t ime_ui_keyboard_area_height(const lv_pinyin_ime_ctx_t *ctx)
      * note there) and passes 0.
      */
     if (ctx->panel == LV_PINYIN_IME_PANEL_VOICE) {
-        return IME_UI_FIT_HEIGHT_PX - 2 * IME_STYLE_ROOT_PAD;
+        return IME_UI_FIT_HEIGHT_PX - 2 * IME_UI_PAD_Y;
     }
     return 0;
 }

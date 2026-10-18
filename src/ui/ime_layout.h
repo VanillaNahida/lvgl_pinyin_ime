@@ -105,10 +105,12 @@ typedef struct {
  *                         （20/20/30/25/25 和 10/10 都是合法的）。
  *                         用于底部功能行、符号页的等宽行。
  *
- *   IME_ROW_ALIGN_CENTER  标准键宽的**十分之一**：w = width_u * U / 10，U 由键盘的
- *                         参考行反算（见 ime_keyboard_t::ref_row）。整行先按标准键宽
- *                         排好、再**整体居中**，行宽不必等于网格宽度 —— 26 键第二、
- *                         三行因此天然缩进，这正是标准手机键盘的观感。
+ *   IME_ROW_ALIGN_CENTER  标准键宽的**十分之一**：每个键的左右边缘吸附到"单位位置
+ *                         × 标准键宽"的网格上（w = px(前缀+自身) - px(前缀)），
+ *                         U 由键盘的参考行反算（见 ime_keyboard_t::ref_row）。
+ *                         参考行正好铺满网格宽度、顶住左右边缘；比参考行窄的行
+ *                         （26 键第二、三行）整行**居中**，于是天然缩进 —— 这正是
+ *                         标准手机键盘的观感，而且同一列的键在不同行严格等宽。
  *
  *   IME_ROW_ALIGN_GRID    预留：按键携带显式逻辑列坐标（跨行对齐用）。目前求解器
  *                         会明确返回 false，而不是静默画歪。
@@ -216,16 +218,6 @@ typedef struct {
     int32_t used_height;   /**< height actually occupied by the rows */
     bool compact;          /**< compact gaps/pads were needed to fit */
     bool tight;            /**< still below the design minimum: keys got smaller */
-    /**
-     * Rounding of CENTER rows: true = round each key to the nearest pixel,
-     * false = round down.
-     *
-     * ★ 这是**整个键盘**统一的一个决定，由 ime_layout_measure() 定下来（只要有任何
-     *   一个 CENTER 行四舍五入后放不进网格，就全体向下取整）。逐行各判一次会让同一个
-     *   0.9u 的键在放得下的行里是 18 px、在放不下的行里是 17 px —— 也就是"同一列的键
-     *   不一样宽"，正是这套网格要消灭的东西。
-     */
-    bool round_widths;
 } ime_layout_metrics_t;
 
 /** Result of ime_layout_validate(): every counter must be 0 for `ok`. */

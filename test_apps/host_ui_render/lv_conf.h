@@ -42,5 +42,11 @@
 
 #define LV_USE_OS LV_OS_NONE
 
+/* The generated fonts span more than the compact 20 bit bitmap_index (the full
+ * dictionary character set needs ~1.6 MB at 20 px), and lv_font_conv emits
+ * lv_font_fmt_txt_glyph_dsc_t with designated initializers, so the large format
+ * cannot desync from the generator. Must match the firmware's sdkconfig. */
+#define LV_FONT_FMT_TXT_LARGE 1
+
 #endif /* LV_CONF_H */
 

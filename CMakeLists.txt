@@ -6,6 +6,7 @@
 # consumes it instead:
 #
 #   examples/k26_k9_demo            flashable demo (ST7789 + XPT2046)
+#   examples/esp32s31-korvo-demo    flashable demo (800x480 RGB + GT1151)
 #   test_apps/idf_component_build   compile check, no hardware
 #
 #   cd examples/k26_k9_demo

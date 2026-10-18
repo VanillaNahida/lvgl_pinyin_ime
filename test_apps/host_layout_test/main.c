@@ -152,7 +152,7 @@ static void test_measure_and_unit(void)
 
 static void test_center_row(void)
 {
-    heading("CENTER 行：标准键宽 + 整行居中");
+    heading("CENTER 行：标准键宽 + 吸附单位网格 + 整行居中");
 
     ime_layout_metrics_t m;
     ime_key_rect_t rects[IME_LAYOUT_KEY_MAX];
@@ -160,22 +160,39 @@ static void test_center_row(void)
     CHECK(solve(&s_kb, 316, 0, &m, rects, &rep), "solvable");
     CHECK(rep.ok, "a valid layout passes its own check");
 
-    /* R1：符 1.5u / 字母 0.9u。0.9 * 23.583 = 21.2 -> 21 px；1.5 * 23.583 = 35.4 -> 35 px */
-    CHECK(rects[0].width == 35, "1.5u key = 35 px, got %d", (int)rects[0].width);
-    for (size_t i = 1; i <= 10; i++) {
-        CHECK(rects[i].width == 21, "0.9u letter %u = 21 px, got %d", (unsigned)i,
-              (int)rects[i].width);
-    }
+    /*
+     * 边缘吸附：每个键的左右边缘都落在 px(u) = round(u * U / 10) 上（U = 23.583）。
+     *   1.5u -> px(15) = 35；1.6u.. 见下。所以 0.9u 的字母是 21 或 22（取决于它的
+     *   单位位置），1.5u 的功能键是 35。**同一个单位位置上的键宽度一定相同**。
+     */
+    CHECK(rects[0].width == 35, "1.5u key at unit 0 = px(15) = 35 px, got %d", (int)rects[0].width);
     CHECK(rects[11].width == 35, "the trailing 1.5u key = 35 px, got %d", (int)rects[11].width);
+    for (size_t i = 1; i <= 10; i++) {
+        const int w = rects[i].width;
+        CHECK(w == 21 || w == 22, "0.9u letter %u is 21 or 22 px, got %d", (unsigned)i, w);
+    }
 
-    /* 同一逻辑宽度 -> 同一像素宽度，哪怕换了一行、位置不同 */
-    const ime_key_rect_t *r1_letter = &rects[1];
-    const ime_key_rect_t *r2_letter = &rects[12 + 1];   /* R2 的第一个字母 */
-    const ime_key_rect_t *r2_mod = &rects[12];         /* R2 的 ⇧ */
-    CHECK(r1_letter->width == r2_letter->width,
-          "the same 0.9u is the same width on R1 and R2 (%d vs %d)", (int)r1_letter->width,
-          (int)r2_letter->width);
-    CHECK(r2_mod->width == rects[0].width, "the same 1.5u is the same width on R1 and R2");
+    /* 参考行**一个像素都不剩**：左右边界就是网格边界（这是"两侧不留白"的保证） */
+    CHECK(rects[0].x == m.x_offset, "the reference row starts at the grid edge (%d vs %d)",
+          (int)rects[0].x, (int)m.x_offset);
+    CHECK(rects[11].x + rects[11].width == m.x_offset + m.content_width,
+          "and ends exactly at the grid's right edge");
+    int total = 0;
+    for (size_t i = 0; i < 12; i++) {
+        total += rects[i].width;
+    }
+    CHECK(total + 11 * m.key_gap == m.content_width,
+          "its widths + gaps equal the grid width exactly (%d + %d)", total, 11 * m.key_gap);
+
+    /*
+     * 同一个单位位置 -> 同一个像素宽度：R2 的第一个字母 a 和 R1 的 q 都在 1.5u 处
+     * （符 / ⇧ 都是 1.5u），所以它们必须**完全相等** —— 这就是"列在不同行之间对齐"。
+     */
+    const ime_key_rect_t *q = &rects[1];
+    const ime_key_rect_t *a = &rects[13];
+    CHECK(q->width == a->width, "q and a sit at the same unit position, so the same width "
+                                "(%d vs %d)", (int)q->width, (int)a->width);
+    CHECK(rects[12].width == rects[0].width, "⇧ and 符 are both 1.5u at unit 0 -> equal");
 
     /* 居中：R2（11 个键）比 R1 窄，两侧留白相等 */
     const ime_key_rect_t *r2_first = &rects[12];
@@ -453,8 +470,12 @@ static void test_real_tables(void)
         for (size_t wi = 0; wi < sizeof(s_widths) / sizeof(s_widths[0]); wi++) {
             for (size_t hi = 0; hi < sizeof(s_heights) / sizeof(s_heights[0]); hi++) {
                 const int32_t w = s_widths[wi];
-                /* 键盘区宽度 = 屏幕宽度 - 控件 root 的左右内边距（各 2 px） */
-                const int32_t area_w = w - 4;
+                /*
+                 * 键盘区宽度 = 屏幕宽度：控件 root 的左右内边距是 0（键盘要顶到屏幕
+                 * 左右边缘，见 IME_STYLE_ROOT_PAD_X）。上下那 2 px 属于垂直预算，
+                 * 由 area_h 之外的调用方负责扣。
+                 */
+                const int32_t area_w = w;
                 const int32_t area_h = s_heights[hi];
 
                 ime_layout_theme_t theme;
@@ -482,9 +503,50 @@ static void test_real_tables(void)
                 }
                 s_checks++;
 
-                /* 判据（指南 §11 的"字母键比例正确"）：同一个逻辑宽度的键，
-                 * 在任何两行之间都必须是同一个像素宽度 —— 这正是旧 flex 实现做不到的
-                 * 那一条（每行各自分摊，同样的 9 单位在不同行宽度不同）。 */
+                /*
+                 * 判据（用户报的"最左侧和最右侧均有留白"）：**整行宽度等于网格宽度
+                 * 的行，必须顶住网格的左右边缘**。参考行（26 键 R1、九键四行、符号页
+                 * 的十列行）和所有 FILL 行都属于这一类 —— 它们的单位之和与参考行相同
+                 * （或按定义铺满），所以不该留下任何边距。
+                 */
+                for (size_t r = 0; r < kb->row_count; r++) {
+                    const ime_row_t *row = &kb->rows[r];
+                    if (row->keys == NULL || row->count == 0) {
+                        continue;
+                    }
+                    int64_t units = 0;
+                    for (size_t k = 0; k < row->count; k++) {
+                        units += row->keys[k].width_u;
+                    }
+                    const ime_key_rect_t *first = &rects[rect_index(kb, r, 0)];
+                    const ime_key_rect_t *last = &rects[rect_index(kb, r, row->count - 1)];
+                    const bool full_width =
+                        (row->align == IME_ROW_ALIGN_FILL) || (units == m.ref_units);
+                    if (!full_width) {
+                        continue;
+                    }
+                    const int32_t left = first->x - m.x_offset;
+                    const int32_t right =
+                        m.x_offset + m.content_width - (last->x + last->width);
+                    if (left != 0 || right != 0) {
+                        printf("  [FAIL] %s at %dx%d: row %u is a full-width row but leaves "
+                               "%d px on the left and %d px on the right\n",
+                               entry->name, (int)area_w, (int)area_h, (unsigned)r, (int)left,
+                               (int)right);
+                        s_failures++;
+                    }
+                    s_checks++;
+                }
+
+                /*
+                 * 判据（指南 §11 的"字母键比例正确"）：**同一个单位位置**上的键，
+                 * 在任何两行之间都必须是同一个像素宽度 —— 这就是"列对齐"。
+                 * 单位位置 = 该键左边缘距离行首的十分之一单位数；26 键 R1 的 q 与
+                 * R2 的 a 都在 1.5u 处，九键四行的第 k 列都在同一个位置。
+                 *
+                 * 只有**位置相同**才要求完全相等：同一行里相邻的等宽键差 1 px 是
+                 * "整行精确铺满"的必然代价（21/22 交替），并排看不出来。
+                 */
                 for (size_t r1 = 0; r1 < kb->row_count; r1++) {
                     if (kb->rows[r1].align != IME_ROW_ALIGN_CENTER) {
                         continue;
@@ -493,22 +555,19 @@ static void test_real_tables(void)
                         if (kb->rows[r2].align != IME_ROW_ALIGN_CENTER) {
                             continue;
                         }
-                        for (size_t k1 = 0; k1 < kb->rows[r1].count; k1++) {
-                            for (size_t k2 = 0; k2 < kb->rows[r2].count; k2++) {
-                                const ime_key_t *ka = &kb->rows[r1].keys[k1];
-                                const ime_key_t *kb2 = &kb->rows[r2].keys[k2];
-                                if (ka->width_u != kb2->width_u) {
+                        int32_t pos1 = 0;
+                        for (size_t k1 = 0; k1 < kb->rows[r1].count; k1++, pos1 += kb->rows[r1].keys[k1].width_u) {
+                            int32_t pos2 = 0;
+                            for (size_t k2 = 0; k2 < kb->rows[r2].count; k2++, pos2 += kb->rows[r2].keys[k2].width_u) {
+                                if (pos1 != pos2) {
                                     continue;
                                 }
-                                const ime_key_rect_t *ra =
-                                    &rects[rect_index(kb, r1, k1)];
-                                const ime_key_rect_t *rb =
-                                    &rects[rect_index(kb, r2, k2)];
+                                const ime_key_rect_t *ra = &rects[rect_index(kb, r1, k1)];
+                                const ime_key_rect_t *rb = &rects[rect_index(kb, r2, k2)];
                                 if (ra->width != rb->width) {
-                                    printf("  [FAIL] %s at %dx%d: %s (%.1fu) is %d px on row %u "
-                                           "but %d px on row %u\n",
-                                           entry->name, (int)area_w, (int)area_h,
-                                           ka->label != NULL ? ka->label : "?", ka->width_u / 10.0,
+                                    printf("  [FAIL] %s at %dx%d: unit position %.1fu is %d px on "
+                                           "row %u but %d px on row %u\n",
+                                           entry->name, (int)area_w, (int)area_h, pos1 / 10.0,
                                            (int)ra->width, (unsigned)r1, (int)rb->width,
                                            (unsigned)r2);
                                     s_failures++;
@@ -539,13 +598,19 @@ static void test_k26_shape(void)
     CHECK(ime_layout_validate(&ime_kb_k26_cn, &m, rects, IME_LAYOUT_KEY_MAX, &rep) && rep.ok,
           "k26 passes its own check");
 
-    /* 每行的第一个字母：R1 的 q(idx 1)、R2 的 a(idx 13)、R3 的 z(idx 26) */
+    /*
+     * **同一个单位位置**上的键宽度必须完全相等，这才是"列对齐"：
+     *   q（R1，1.5u 的 符 之后）与 a（R2，1.5u 的 ⇧ 之后）都在 1.5u 处；
+     *   z（R3，1.5u 的分词 + 0.9u 的 - 之后 = 2.4u 处）与 w（R1，2.4u 处）同位置。
+     */
     const ime_key_rect_t *q = &rects[1];
     const ime_key_rect_t *a = &rects[13];
+    const ime_key_rect_t *w = &rects[2];
     const ime_key_rect_t *z = &rects[26];
-    CHECK(q->width == a->width && a->width == z->width,
-          "the letters are the same width on R1/R2/R3 (%d/%d/%d)", (int)q->width, (int)a->width,
-          (int)z->width);
+    CHECK(q->width == a->width, "q and a are both at 1.5u -> the same width (%d vs %d)",
+          (int)q->width, (int)a->width);
+    CHECK(w->width == z->width, "w and z are both at 2.4u -> the same width (%d vs %d)",
+          (int)w->width, (int)z->width);
     CHECK(q->height == a->height && a->height == z->height, "and the same height");
 
     /* R2 / R3 都是居中行：整体比 R1 窄，且两侧留白相等 */
@@ -555,6 +620,9 @@ static void test_k26_shape(void)
     const int r2_r = rects[22].x + rects[22].width;
     const int r3_l = rects[23].x;
     const int r3_r = rects[34].x + rects[34].width;
+    CHECK(r1_l == m.x_offset && r1_r == m.x_offset + m.content_width,
+          "R1 spans the grid exactly: %d..%d in %d..%d", r1_l, r1_r, (int)m.x_offset,
+          (int)(m.x_offset + m.content_width));
     CHECK(r2_l > r1_l && r2_r < r1_r, "R2 is indented on both sides (%d..%d vs %d..%d)", r2_l, r2_r,
           r1_l, r1_r);
     CHECK(r3_l > r1_l && r3_r < r1_r, "R3 is indented on both sides (%d..%d)", r3_l, r3_r);
@@ -591,10 +659,10 @@ static void test_k9_shape(void)
           "k9 passes its own check");
 
     /*
-     * 四行都是 CENTER 行（5 个 2.4u 的键 = 12u，本来就是标准键宽），所以它们必须
-     * **彼此完全对齐**：同一列在任何一行都是同一个 x 和同一个宽度。
-     * ★ 不要求"正好顶到网格边缘"：四舍五入放不下时会全体向下取整，行比网格窄几个
-     *   像素、两侧各留一点 —— 那比"同一列的键差 1 px"好得多（见 metrics.round_widths）。
+     * 四行都是 CENTER 行（5 个 2.4u 的键 = 12u），单位位置逐列相同 —— 所以四行必须
+     * **完全对齐**：同一列在任何一行都是同一个 x 和同一个宽度。
+     * ★ 行内相邻的键可能差 1 px（124/125 交替）：那是"整行正好 12u、一个像素不剩"的
+     *   代价，四行之间仍然完全一致。
      */
     for (size_t r = 0; r < 3; r++) {
         const ime_key_rect_t *row = &rects[r * 5];
@@ -608,12 +676,10 @@ static void test_k9_shape(void)
                 CHECK(row[k].x - (row[k - 1].x + row[k - 1].width) == m.key_gap, "even gaps");
             }
         }
-        /* 居中：行内两侧留白相等，而且行不会比网格宽 */
-        const int left = row[0].x - m.x_offset;
-        const int right = m.x_offset + m.content_width - (row[4].x + row[4].width);
-        CHECK(left >= 0 && right >= 0, "row %u stays inside the grid", (unsigned)r);
-        CHECK(left - right <= 1 && right - left <= 1, "row %u is centered (%d vs %d)", (unsigned)r,
-              left, right);
+        /* 每行都正好铺满网格（5 个 2.4u = 12u） */
+        CHECK(row[0].x == m.x_offset, "row %u starts at the grid edge", (unsigned)r);
+        CHECK(row[4].x + row[4].width == m.x_offset + m.content_width,
+              "row %u ends at the grid edge", (unsigned)r);
     }
 
     /* 底行 FILL：20/20/60 */

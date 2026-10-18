@@ -203,7 +203,7 @@ static void voice_bar_ensure(lv_pinyin_ime_ctx_t *ctx)
     /* 右上角、控件内容区之外：和拼音浮窗分居两侧，互不重叠。 */
     const lv_font_t *font = ime_font_small();
     const int line_h = (font != NULL) ? (int)font->line_height : 20;
-    lv_obj_align(ctx->voice_bar, LV_ALIGN_TOP_RIGHT, -(IME_UI_PAD + 2), -(line_h + 5));
+    lv_obj_align(ctx->voice_bar, LV_ALIGN_TOP_RIGHT, -(IME_UI_PAD_X + 2), -(line_h + 5));
 }
 
 /** 更新状态条（会话进行中才显示）。 */

@@ -78,6 +78,118 @@ __attribute__((weak)) void ime_vfs_unmount(ime_vfs_mount_t *mount)
 }
 #endif
 
+/* ---------------------------------------------------------------------------
+ * Dictionary image sanity check
+ *
+ * libgooglepinyin's file starts with its spelling table header:
+ *
+ *   u32 spelling_size, u32 spelling_num, float score_amplifier, u8 average_score
+ *
+ * and the engine allocates spelling_size * spelling_num bytes straight from
+ * those two words in SpellingTrie::load_spl_trie(). A "dict" partition that was
+ * never flashed (all 0xFF), or that holds something other than the dictionary,
+ * therefore makes operator new[] throw; the C++ exception stubs then call
+ * abort() and the board reboots in a loop with a backtrace that points at the
+ * allocator instead of at the real problem.
+ *
+ * Checking the header first turns that into a warning plus the embedded
+ * fallback. tools/check_dict.py probes the same fields on the host.
+ * ------------------------------------------------------------------------- */
+
+#define IME_DICT_MAX_SPELLING_SIZE 16u
+#define IME_DICT_MAX_SPELLING_NUM 482u /* 512 - kHalfSpellingIdNum - 1 */
+#define IME_DICT_HEADER_BYTES 13u
+
+static uint32_t read_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/** @p size is the whole image length; the spelling table has to fit inside it. */
+static bool dict_image_plausible(const uint8_t *data, size_t size)
+{
+    if (data == NULL || size < IME_DICT_HEADER_BYTES) {
+        return false;
+    }
+
+    uint32_t spelling_size = read_le32(data);
+    uint32_t spelling_num = read_le32(data + 4);
+    uint32_t amplifier_bits = read_le32(data + 8);
+    uint8_t average_score = data[12];
+
+    float amplifier;
+    memcpy(&amplifier, &amplifier_bits, sizeof(amplifier));
+
+    if (spelling_size == 0 || spelling_size > IME_DICT_MAX_SPELLING_SIZE) {
+        return false;
+    }
+    if (spelling_num == 0 || spelling_num > IME_DICT_MAX_SPELLING_NUM) {
+        return false;
+    }
+    /* Written this way so that a NaN also fails. */
+    if (!(amplifier > -1000.0f && amplifier < 1000.0f)) {
+        return false;
+    }
+    if (average_score == 0) {
+        return false;
+    }
+    if (IME_DICT_HEADER_BYTES + (size_t)spelling_size * spelling_num > size) {
+        return false;
+    }
+    return true;
+}
+
+static void log_bad_image(const char *what, const uint8_t *data, size_t size)
+{
+    if (data != NULL && size >= 4) {
+        IME_LOGE(TAG, "%s is not a dictionary (%u bytes, starts with %02X %02X %02X %02X)", what,
+                 (unsigned)size, data[0], data[1], data[2], data[3]);
+    } else {
+        IME_LOGE(TAG, "%s is not a dictionary (%u bytes)", what, (unsigned)size);
+    }
+}
+
+/** Same check for a dictionary that lives in a file (the SD card source).
+ * Only the SDCARD source and host builds call it, so it is unused in a default
+ * partition build. */
+#if defined(__GNUC__)
+__attribute__((unused))
+#endif
+static bool file_is_dictionary(const char *path)
+{
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return false;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    long total = ftell(fp);
+    if (total < (long)IME_DICT_HEADER_BYTES) {
+        fclose(fp);
+        return false;
+    }
+
+    fseek(fp, 0, SEEK_SET);
+    uint8_t head[IME_DICT_HEADER_BYTES];
+    size_t got = fread(head, 1, sizeof(head), fp);
+    fclose(fp);
+
+    if (got != sizeof(head)) {
+        return false;
+    }
+    if (!dict_image_plausible(head, (size_t)total)) {
+        log_bad_image(path, head, (size_t)total);
+        return false;
+    }
+    return true;
+}
+
+/** Only the default (partition) source and the fallback path call it; a build
+ * that selects the embedded or SD card source does not, hence the attribute
+ * (same reason as file_is_dictionary() above). */
+#if defined(__GNUC__)
+__attribute__((unused))
+#endif
 static bool prepare_partition(void)
 {
 #if defined(CONFIG_LV_PINYIN_IME_DICT_PARTITION)
@@ -89,6 +201,21 @@ static bool prepare_partition(void)
     if (s_mount == NULL) {
         return false;
     }
+
+    /* Refuse anything that is not a dictionary: handing garbage to the engine
+     * aborts the firmware (see the comment above), while returning false here
+     * makes ime_dict_prepare() fall back to the embedded copy, which is present
+     * in every default build. */
+    if (!dict_image_plausible(s_mount->data, s_mount->size)) {
+        log_bad_image("dict partition", s_mount->data, s_mount->size);
+        IME_LOGE(TAG, "partition \"%s\" holds no dictionary; flash it with "
+                      "tools/flash_dict.ps1 (-Dict), or set LV_PINYIN_IME_EMBED_DICT to use "
+                      "the built-in copy", label);
+        ime_vfs_unmount(s_mount);
+        s_mount = NULL;
+        return false;
+    }
+
     /* The file size is the trimmed payload, which is what the engine will read;
      * the partition size is usually larger and is not interesting here. */
     s_size = s_mount->size;
@@ -122,6 +249,10 @@ static bool prepare_host_file(void)
         IME_LOGE(TAG, "%s is empty", path);
         return false;
     }
+    if (!file_is_dictionary(path)) {
+        IME_LOGE(TAG, "%s is not a dictionary; regenerate it with tools/gen_dict.py", path);
+        return false;
+    }
 
     snprintf(s_path, sizeof(s_path), "%s", path);
     s_size = (size_t)size;
@@ -134,6 +265,12 @@ static bool prepare_embedded(void)
     size_t blob_size = (size_t)(dict_pinyin_dat_end - dict_pinyin_dat_start);
     if (blob_size == 0) {
         IME_LOGE(TAG, "embedded dictionary is empty (was data/dict/dict_pinyin.dat present at build time?)");
+        return false;
+    }
+
+    if (!dict_image_plausible(dict_pinyin_dat_start, blob_size)) {
+        log_bad_image("embedded dictionary", dict_pinyin_dat_start, blob_size);
+        IME_LOGE(TAG, "regenerate it with tools/gen_dict.py");
         return false;
     }
 
@@ -178,6 +315,11 @@ static bool prepare_sdcard(void)
     fclose(fp);
     if (size <= 0) {
         IME_LOGE(TAG, "%s is empty", path);
+        return false;
+    }
+    if (!file_is_dictionary(path)) {
+        IME_LOGE(TAG, "%s holds no dictionary; copy data/dict/dict_pinyin.dat onto the card",
+                 path);
         return false;
     }
     snprintf(s_path, sizeof(s_path), "%s", path);

@@ -1,0 +1,51 @@
+# Shared defaults for the esp32s31-korvo-demo example.
+#
+# Everything here is board independent; the ESP32-S31 specifics (PSRAM) live in
+# sdkconfig.defaults.esp32s31.
+
+# 16 MB flash (in-package, ESP32-S31-WROOM-3) with the IME partition layout.
+# Keep in sync with sdkconfig.defaults of k26_k9_demo: the partition offsets are
+# the same file, so a dict/font partition flashed for one demo also works here.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../partitions/ime_16mb.csv"
+
+# Dictionary source: the copy compiled into the application.
+#
+# The partition table below still has a "dict" partition, but `idf.py flash`
+# does not write it - so with the default "flash partition" source every boot
+# starts with
+#     E ime_dict: dict partition is not a dictionary (... starts with FF FF FF FF)
+# and then falls back to the embedded copy anyway. A demo has to work after a
+# plain `idf.py flash`, so it asks for the embedded copy directly.
+#
+# For a product, switch back to LV_PINYIN_IME_DICT_SRC_PARTITION (3 MB less app
+# size) and flash the partition once with tools/flash_dict.ps1.
+CONFIG_LV_PINYIN_IME_DICT_SRC_EMBEDDED=y
+
+CONFIG_FREERTOS_HZ=1000
+
+# The demo builds its UI from app_main (the LVGL task of esp_lvgl_port only
+# handles rendering), and building the keyboard needs far more than the 3584
+# byte default stack.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
+
+# LVGL: 16 bit colour per pixel, matching the RGB565 panel.
+CONFIG_LV_COLOR_DEPTH_16=y
+
+# LV_FONT_FMT_TXT_LARGE is REQUIRED: the IME fonts cover the dictionary
+# character set (~17k glyphs) and the 20 px font needs ~1.6 MB of glyph
+# bitmaps, past the 1 MB that the compact 20 bit bitmap_index field can
+# address.
+CONFIG_LV_FONT_FMT_TXT_LARGE=y
+
+# ---------------------------------------------------------------------------
+# Voice input (iFlytek IAT) - OFF, and deliberately not wired in this demo.
+#
+# The Korvo-1 does have a dual microphone array behind the ES8389 codec, so
+# voice input is possible - but it needs the ESP-IDF/esp_codec_dev audio stack
+# plus iFlytek credentials, and the point of this example is the keyboard.
+# docs/voice.md describes what an application has to provide; k26_k9_demo has a
+# complete reference (PDM microphone) to copy from.
+# ---------------------------------------------------------------------------
+# CONFIG_LV_PINYIN_IME_VOICE_ENABLE is not set

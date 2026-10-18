@@ -107,22 +107,31 @@ u32  freq         共现次数
 
 ## 5. 字体分区镜像 `font_partition.bin`
 
-由 `tools/gen_font.py --format bin` 生成，采用"两段式 + 目录"结构：
+由 `tools/gen_font.py --format bin` 生成：**没有目录头**，就是两个 LVGL 二进制字体
+首尾相接，大字在前。
 
 | 偏移 | 内容 |
 | --- | --- |
-| 0 | 目录：u32 段数 `n`，随后 `n` 组 `{u32 offset, u32 size}` |
-| 对齐到 4 字节后 | 段 0：`lv_font_ime_20.bin` |
-| 紧接 | 段 1：`lv_font_ime_16.bin` |
+| 0 | 段 0：`lv_font_ime_20.bin` |
+| 段 0 结束处 | 段 1：`lv_font_ime_16.bin` |
 
-- 单段由 `lv_font_conv` 产出：`--format bin --no-compress`（不压缩，见
-  [integration.md](./integration.md) 第 5.4 节），默认 2 bpp
-- 目标字符集：GB2312 + UI 符号 + ASCII（7 549 字；见 `gen_charset.py`）
-- 运行时：`esp_partition_mmap()` 取得首字体长度后，由 `src/data/ime_font.c` 把整段
-  镜像拷进 PSRAM，再按目录偏移调 `lv_binfont_create_from_buffer(ptr + offset, size)`
-- 实测体积约 2 413 KB
+> 这里原先写的是"两段式 + 目录"（开头 u32 段数加 offset/size 数组）。**那是错的**：
+> `gen_font.py --format bin` 只做字节拼接，`src/data/ime_font.c` 也明确写着"分区没有
+> 目录布局"，它靠走表链求段长。
 
-配套产出 `generated/font_layout.json` 记录各段的 offset/size，供固件侧或宿主工具核对。
+- 单段由 `lv_font_conv` 产出：`--format bin --no-compress`（不压缩），默认 2 bpp
+- 目标字符集：GB2312 + UI + ASCII + 词库字集（17 265 字；见 `gen_charset.py`），
+  需要 `LV_FONT_FMT_TXT_LARGE`（位图超过 20 位偏移的 1 MB 上限）
+- 段长怎么求：每段自身是 `[u32 length][4 字节 label]` 的表链
+  （`head`/`cmap`/`loca`/`glyf`/`kern`）。`ime_font.c` 从头走完第一段的表链得到
+  它的长度，第二段就紧接其后，所以不需要额外目录
+- 运行时：`esp_partition_mmap()` 映射分区，整段拷进 PSRAM，再分别调
+  `lv_binfont_create_from_buffer(base, big_len)` 与 `(base + big_len, small_len)`
+- 实测体积：全量字表 + 2 bpp = 3 058 164 B（约 2 986 KB）。3 MB 的 `font` 分区
+  只剩约 85 KB 余量，字表再涨就会放不下
+
+`tools/gen_font.py --format bin` 同时写出 `generated/font_layout.json` 记录两段的
+offset/size，供人工核对；固件不读它。
 
 ## 6. 校验清单
 
@@ -131,7 +140,7 @@ u32  freq         共现次数
 | `ime_ext.bin` 魔数 / 版本 / 长度一致性 | `ime_extdict.c` 装载入口 | 规划中 |
 | `ime_bigram.bin` 同上 | `ime_assoc.c` 装载入口 | 规划中 |
 | `dict_pinyin.dat` 大小与魔数 | `tools/gen_dict.py` + `ime_dict.c` | 已实现 |
-| 字体分区目录段数与偏移越界 | `ime_font.c` | 已实现 |
+| 字体分区表链长度与越界 | `ime_font.c` | 已实现 |
 
 任一校验失败：记录 `ESP_LOGW`/`ESP_LOGE`，进入对应的降级路径（词库回退内嵌副本、
 字体回退内嵌数组），不得导致启动失败。

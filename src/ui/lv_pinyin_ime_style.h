@@ -15,12 +15,18 @@ extern "C" {
  * Padding inside the widget root and the gap between the root's children.
  *
  * ★ 唯一的定义处：ime_style_apply_root() 把这两个值写进样式，而控件的垂直分摊
- *   （ime_ui_apply_sizes）必须减掉**同样的**数值。以前两边各写一遍 2 和 3，改一处
+ *   （ime_ui_fit_row_height）必须减掉**同样的**数值。以前两边各写一遍 2 和 3，改一处
  *   忘一处就是"总高度差几个像素"这类难查的问题。
+ *
+ * ★ 左右为 0（上下仍留 2 px）：键盘网格要**顶到控件左右边缘**。留着 2 px 的话，最左边
+ *   的 符 / ?123 和最右边的 ⌫ / ✓ 与屏幕边缘之间会有一条背景色窄条，看着像键盘没有铺满
+ *   （用户报的"最左侧和最右侧均有留白"）。上下那 2 px 是键盘面板与候选栏之间的呼吸位，
+ *   保留。
  *
  * ★ 键盘区内部（布局引擎的 outer_pad_*）因此必须是 0：root 已经让出了这份间距。
  */
-#define IME_STYLE_ROOT_PAD 2
+#define IME_STYLE_ROOT_PAD_X 0
+#define IME_STYLE_ROOT_PAD_Y 2
 #define IME_STYLE_ROOT_GAP 3
 
 /** Create the shared styles. Idempotent. */

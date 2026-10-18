@@ -1,0 +1,14 @@
+dependencies:
+  # The RGB panel of the 4.3" SUB3 sub-board is only registered as a preview
+  # target in ESP-IDF 6.1, and the LVGL 9.5 API of this component needs a
+  # reasonably recent port.
+  idf: ">=5.4"
+  lvgl/lvgl: "^9.5"
+
+  # Display/touch glue: esp_lvgl_port wraps the RGB panel into an LVGL display
+  # (its own task, the LVGL mutex, and the flush path), esp_lcd_touch_gt1151
+  # drives the capacitive touch controller on the sub-board. Both are the
+  # components the official esp32_s31_korvo_1 BSP uses; pulling only these two
+  # keeps audio, camera and SD out of a keyboard demo.
+  espressif/esp_lvgl_port: "^2"
+  espressif/esp_lcd_touch_gt1151: "^1"

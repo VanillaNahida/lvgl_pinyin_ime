@@ -104,8 +104,17 @@ void ime_style_init(void)
     lv_style_set_bg_color(&s_key_pressed, IME_COLOR_KEY_DOWN);
     lv_style_set_bg_opa(&s_key_pressed, LV_OPA_COVER);
 
+    /*
+     * ★ 功能键也必须自己写 bg_opa —— 和下面 s_key_pressed 是同一个坑：
+     *   ime_style_apply_key() 开头的 lv_obj_remove_style_all() 把主题样式（包括
+     *   lv_button 默认那层不透明背景）一起摘掉了，样式只携带它**定义过**的属性，
+     *   于是没写 bg_opa 的 s_key_special 解析出来是"全透明"。
+     *   表现就是：⌫ / ⏎ / ⇧ / 分词 / 整个底部功能行只有一圈描边和文字，键面是空的
+     *   （底板的颜色直接透出来），看着像键盘少画了一排键。
+     */
     init_key(&s_key_special);
     lv_style_set_bg_color(&s_key_special, IME_COLOR_SPECIAL);
+    lv_style_set_bg_opa(&s_key_special, LV_OPA_COVER);
     lv_style_set_text_color(&s_key_special, IME_COLOR_TEXT);
 
     /*
@@ -226,7 +235,11 @@ void ime_style_apply_root(lv_obj_t *root)
     lv_obj_remove_style_all(root);
     lv_obj_set_style_bg_color(root, IME_COLOR_BG, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(root, IME_STYLE_ROOT_PAD, LV_PART_MAIN);
+    /* 左右 0：键盘网格顶到控件边缘，见 IME_STYLE_ROOT_PAD_X 的说明。 */
+    lv_obj_set_style_pad_left(root, IME_STYLE_ROOT_PAD_X, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(root, IME_STYLE_ROOT_PAD_X, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(root, IME_STYLE_ROOT_PAD_Y, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(root, IME_STYLE_ROOT_PAD_Y, LV_PART_MAIN);
     lv_obj_set_style_pad_row(root, IME_STYLE_ROOT_GAP, LV_PART_MAIN);
 }
 

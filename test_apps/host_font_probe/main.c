@@ -71,12 +71,48 @@ static int check_font(const lv_font_t *font, const char *name)
            (const void *)fdsc->glyph_dsc);
     fflush(stdout);
 
+    /*
+     * Walk every glyph descriptor. The full dictionary character set pushes
+     * glyph_bitmap[] past 1 MB, which is exactly what the compact 20 bit
+     * bitmap_index cannot address, so this is where LV_FONT_FMT_TXT_LARGE has
+     * to earn its keep: with the option off the compiler truncates each
+     * offset on assignment, the sweep reports over_1mb = 0, and the glyphs
+     * past the 1 MB mark draw as garbage.
+     */
+    uint32_t glyphs = 0;
+    for (int i = 0; i < (int)fdsc->cmap_num; i++) {
+        uint32_t last = (uint32_t)fdsc->cmaps[i].glyph_id_start + fdsc->cmaps[i].range_length;
+        if (last > glyphs) {
+            glyphs = last;
+        }
+    }
+
+    uint32_t max_index = 0;
+    uint32_t over_1mb = 0;
+    for (uint32_t g = 0; g < glyphs; g++) {
+        uint32_t index = fdsc->glyph_dsc[g].bitmap_index;
+        if (index > max_index) {
+            max_index = index;
+        }
+        if (index > 1048575u) {
+            over_1mb++;
+        }
+    }
+    printf("  glyphs=%u max_bitmap_index=%u glyphs_past_1MB=%u\n",
+           (unsigned)glyphs, (unsigned)max_index, (unsigned)over_1mb);
+    fflush(stdout);
+
     int good = 0;
     int total = 0;
     total++; good += probe(font, name, 'q', "latin");
     total++; good += probe(font, name, 'A', "latin");
-    total++; good += probe(font, name, 0x4F60, "CJK");     /* 你 */
-    total++; good += probe(font, name, 0x7B26, "CJK");     /* 符 */
+    total++; good += probe(font, name, 0x4F60, "CJK");     /* 你, GB2312 */
+    total++; good += probe(font, name, 0x7B26, "CJK");     /* 符, GB2312 */
+    /* Late glyphs: the charset is sorted, so these sit near the end of
+     * glyph_bitmap[] and are the ones the compact offset cannot reach. */
+    total++; good += probe(font, name, 0x9E6B, "rare CJK");  /* 鹫 */
+    total++; good += probe(font, name, 0x9FA5, "rare CJK");  /* 龥 */
+    total++; good += probe(font, name, 0xFFE5, "fullwidth"); /* ￥ */
     /* U+2190 is the backspace caption. U+232B (⌫) is intentionally not used:
      * DreamHanSansSC-W17 has no glyph for it, so the keyboard draws ←. */
     total++; good += probe(font, name, 0x2190, "symbol");
@@ -118,8 +154,8 @@ int main(void)
 
     if (good == 0) {
         printf("RESULT: the generated fonts supply NO usable glyphs.\n"
-               "        Check that LV_FONT_FMT_TXT_LARGE matches the generator\n"
-               "        (lv_font_conv emits the compact 8 byte descriptor, so it must be 0).\n");
+               "        Check that LV_FONT_FMT_TXT_LARGE matches the generator: the\n"
+               "        full dictionary charset needs it ON (see src/data/ime_font.c).\n");
         return 1;
     }
     printf("RESULT: %d glyph probes usable\n", good);
