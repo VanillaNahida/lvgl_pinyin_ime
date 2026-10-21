@@ -310,3 +310,14 @@ SQLite 承载的语言模型，因此并不适合 ESP32 目标。
 
 Apache-2.0。见 [LICENSE](LICENSE)。内置的 libgooglepinyin 保留其自身的
 Apache-2.0 许可证与上游署名，位于 `src/third_party/` 下。
+
+## Star History
+
+<a href="https://star-history.com/#VanillaNahida/lvgl_pinyin_ime&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=VanillaNahida/lvgl_pinyin_ime&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=VanillaNahida/lvgl_pinyin_ime&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=VanillaNahida/lvgl_pinyin_ime&type=Date" />
+  </picture>
+</a>
+

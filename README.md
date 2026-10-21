@@ -346,3 +346,14 @@ cloud pinyin and customisable punctuation for free.
 
 Apache-2.0. See [LICENSE](LICENSE). The vendored libgooglepinyin keeps its own
 Apache-2.0 license and upstream attribution under `src/third_party/`.
+
+## Star History
+
+<a href="https://star-history.com/#VanillaNahida/lvgl_pinyin_ime&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=VanillaNahida/lvgl_pinyin_ime&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=VanillaNahida/lvgl_pinyin_ime&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=VanillaNahida/lvgl_pinyin_ime&type=Date" />
+  </picture>
+</a>
+
